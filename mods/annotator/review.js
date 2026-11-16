@@ -116,6 +116,19 @@ export function fileStats(file) {
     removed: file.rows.filter(r => r.kind === "delete").length };
 }
 
+// The line to open: the selected new-side line, else the first added line.
+export function editorLine(file, selection) {
+  if (selection?.side === "new") return selection.start;
+  return file.rows.find(row => row.kind === "add")?.new ?? file.rows.find(row => row.new != null)?.new ?? 1;
+}
+
+// `code` arguments for a file in the checkout. Remote machines open through
+// VS Code Remote-SSH with the core's ssh target, inside the checkout folder.
+export function editorArgs(repo, path, line, sshTarget = null) {
+  const file = `${repo.replace(/\/$/, "")}/${path}:${line}`;
+  return sshTarget ? ["--remote", `ssh-remote+${sshTarget}`, repo, "-g", file] : [repo, "-g", file];
+}
+
 export function reviewTotals(files) {
   return files.reduce((total, file) => {
     const stats = fileStats(file);

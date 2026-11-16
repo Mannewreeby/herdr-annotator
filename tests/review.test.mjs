@@ -1,6 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { selectionFor, selectionPayload, selected, inlineAt, pendingComments, sessionTarget, fileStats, pathParts, commentStatus, commentLocation, reviewSummary, sendHint, visibleComments, unreadItems, snapshotFailure, diffReaderEntries, splitRows, contextGaps, reviewTargetReady, reviewTotals } from "../mods/annotator/review.js";
+import { selectionFor, selectionPayload, selected, inlineAt, pendingComments, sessionTarget, fileStats, pathParts, commentStatus, commentLocation, reviewSummary, sendHint, visibleComments, unreadItems, snapshotFailure, diffReaderEntries, splitRows, contextGaps, reviewTargetReady, reviewTotals, editorLine, editorArgs } from "../mods/annotator/review.js";
+
+test("VS Code opens the selected or first changed line, remotely through Remote-SSH", () => {
+  const file = { rows: [{ kind: "hunk" }, { kind: "context", old: 4, new: 4 }, { kind: "add", new: 5 }] };
+  assert.equal(editorLine(file, null), 5);
+  assert.equal(editorLine(file, { side: "new", start: 9, end: 12 }), 9);
+  assert.equal(editorLine(file, { side: "old", start: 2, end: 2 }), 5);
+  assert.equal(editorLine({ rows: [] }, null), 1);
+  assert.deepEqual(editorArgs("/repo/", "src/a b.rs", 5), ["/repo/", "-g", "/repo/src/a b.rs:5"]);
+  assert.deepEqual(editorArgs("/home/j/repo", "x.rs", 2, "manjaro"),
+    ["--remote", "ssh-remote+manjaro", "/home/j/repo", "-g", "/home/j/repo/x.rs:2"]);
+});
 
 test("review totals use Git's counts and fall back to loaded rows", () => {
   const files = [

@@ -160,6 +160,8 @@ export function renderFull(self, cx) {
            .when(Boolean(selection), el => el.child(self.button("copy-full-source-selection", "Copy lines", cx => self.copyText(copiedSelection(file, selection), cx))))
           .child(self.button("full-prev-file", "‹", cx => self.selectFile(files[fileIndex - 1].path, cx), fileIndex > 0))
           .child(self.button("full-next-file", "›", cx => self.selectFile(files[fileIndex + 1].path, cx), fileIndex >= 0 && fileIndex + 1 < files.length))
+          .child(self.button("copy-full-file-path", "Copy path", cx => self.copyText(file.path, cx), Boolean(file)).tooltip(file?.path ?? ""))
+          .child(self.button("full-open-in-vscode", "VS Code", cx => self.openInEditor(file, cx), Boolean(file) && !file.status.includes("D")).tooltip("Open in VS Code at this line"))
           .child(self.button("full-file-actions", "File ▾", cx => { self.fileActionsOpen = !self.fileActionsOpen; cx.notify(); })))
         .when(self.fileActionsOpen, el => el.child(h_flex().id("full-file-options").px(10).py(4).gap(4).flex_wrap().items_center()
           .child(self.button("full-context-more", "+20 context", cx => self.expandContext(Math.min(1000000, self.contextLines + 20), cx), Boolean(file) && self.contextLines < 1000000))

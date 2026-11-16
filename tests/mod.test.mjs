@@ -92,6 +92,7 @@ function harness() {
     spaces: () => [{ id: "space1", tabs: [{ id: state.tab }, ...(state.reviewTabs ?? [])] }],
     panes: () => state.reviewPanes ?? [],
     home: () => "/home/me", exec: async (_helper, args) => {
+      if (state.exec && ["code", "hc"].includes(_helper)) return state.exec(_helper, args);
       if (_helper === "python3") return { code: 0, stdout: JSON.stringify({ ok: true, data: { current: "0.2.0", latest: null, checked_at: Date.now() / 1000, job: {} } }) };
       if (_helper === "herdr-app") {
         state.commands.push({ name: args[1], args: JSON.parse(args[2]) });
@@ -1238,6 +1239,26 @@ test("split rows pair unequal changes and never cross hunks", () => {
   assert.equal(review.splitSelectionRow(split[1], "new"), null);
   assert.equal(review.splitSelectionRow(split[3], "old").new, null);
   assert.equal(review.splitSelectionRow(split[3], "new").old, null);
+});
+
+for (const full of [false, true]) test(`${full ? "full" : "sidebar"} copies the file path and opens VS Code at the selected line`, async () => {
+  const h = harness(); h.state.props = full ? { presentation: "full" } : {};
+  const execs = [];
+  h.state.scope = { repo: "/checkout", machine: "manjaro" };
+  h.mod.init({}, h.cx); await h.drain();
+  h.mod.selection = { side: "new", start: 2, end: 2 };
+  h.nodes.length = 0; h.mod.render(h.cx);
+  h.nodes.find(n => n.id === (full ? "copy-full-file-path" : "copy-file-path")).events.on_click(null, h.cx);
+  assert.equal(h.state.clipboard, "a.rs");
+  h.state.exec = (cmd, args) => {
+    execs.push([cmd, args]);
+    return cmd === "hc" ? { code: 0, stdout: JSON.stringify({ machines: [{ name: "manjaro", target: "box", via: false }] }), stderr: "" }
+      : { code: 0, stdout: "", stderr: "" };
+  };
+  h.nodes.find(n => n.id === (full ? "full-open-in-vscode" : "open-in-vscode")).events.on_click(null, h.cx);
+  await new Promise(setImmediate);
+  assert.deepEqual(execs.at(-1), ["code", ["--remote", "ssh-remote+box", "/checkout", "-g", "/checkout/a.rs:2"]]);
+  assert.equal(h.requests.filter(r => ["send", "ask"].includes(r.op)).length, 0);
 });
 
 for (const full of [false, true]) test(`${full ? "full" : "sidebar"} shows overall added and removed lines`, async () => {

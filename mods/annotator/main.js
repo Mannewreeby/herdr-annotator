@@ -9,7 +9,7 @@ import { GithubRefresh } from "./github-refresh.js";
 import { reviewLocation } from "./review.js";
 import { UpdateController } from "./updates.js";
 import { escapeText, copiedDiff, copiedSelection, contextGaps } from "./review.js";
-import { reviewOrderKey, orderedReviewFiles, existingReviewTab, deliveryBlocker, reviewTargetReady, reviewedDraft, agentWaiting, reviewTotals } from "./review.js";
+import { reviewOrderKey, orderedReviewFiles, existingReviewTab, deliveryBlocker, reviewTargetReady, reviewedDraft, agentWaiting, reviewTotals, editorLine, editorArgs } from "./review.js";
 
 function location() {
   const fixed = props();
@@ -988,6 +988,25 @@ export default class Annotator extends View {
     this.refresh(cx, false, true);
   }
 
+  async openInEditor(file, cx) {
+    const scope = this.data?.snapshot.scope;
+    if (!file || !scope || file.status.includes("D")) return;
+    const line = editorLine(file, this.selection);
+    try {
+      let target = null;
+      if (scope.machine) {
+        const out = await exec("hc", ["machine", "ls", "--json"]);
+        const machine = JSON.parse(out.stdout).machines?.find(m => m.name === scope.machine);
+        // A `via` machine is reached by a custom command, not ssh.
+        if (!machine || machine.via) throw new Error(`${scope.machine} is not reachable over ssh`);
+        target = machine.target;
+      }
+      const out = await exec("code", editorArgs(scope.repo, file.path, line, target));
+      if (out.code !== 0) throw new Error(out.stderr.trim() || `code exited ${out.code}`);
+    } catch (e) { this.notice = `Cannot open in VS Code: ${e.message ?? e}`; }
+    cx.notify();
+  }
+
   loadLargeDiff(cx) {
     if (this.busy) return;
     this.largeDiffs ??= new Set();
@@ -1399,9 +1418,11 @@ export default class Annotator extends View {
         .child(resizable_panel().size(this.sizes[1]).size_range(90).child(v_flex().size_full().min_h(0)
       .when(this.view === "diff", el => el
         .when(Boolean(file), el => el.child(v_flex().flex_none().px(12).py(7).gap(3).border_t(1).border_b(1).border_color(t.border)
-          .child(h_flex().gap(6).items_center().child(div().flex_1().min_w(0).truncate().font_semibold().text_size(12.5).child(source?.name))
+          .child(h_flex().gap(6).items_center().child(this.selectableText("review-file-name", source?.name ?? "").flex_1().min_w(0).truncate().font_semibold().text_size(12.5))
             .when(stats?.added > 0, el => el.child(this.badge(`+${stats.added}`, t.ansi2)))
-            .when(stats?.removed > 0, el => el.child(this.badge(`−${stats.removed}`, t.ansi1))))
+            .when(stats?.removed > 0, el => el.child(this.badge(`−${stats.removed}`, t.ansi1)))
+            .child(this.button("copy-file-path", "Copy path", cx => this.copyText(file.path, cx)).tooltip(file.path))
+            .child(this.button("open-in-vscode", "VS Code", cx => this.openInEditor(file, cx), !file.status.includes("D")).tooltip("Open in VS Code at this line")))
           .when(Boolean(source?.folder), el => el.child(div().text_size(10.5).text_color(t.dim).truncate().child(source.folder)))
           .child(h_flex().gap(4)
             .child(this.button("context-more", "+20 context", cx => this.expandContext(Math.min(1000000, this.contextLines + 20), cx), this.contextLines < 1000000))
