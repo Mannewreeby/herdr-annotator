@@ -599,7 +599,9 @@ export default class Annotator extends View {
 
   handleKey(event, cx) {
     if (["cmd-c", "ctrl-c"].includes(event.keystroke) && !event.modifiers?.shift && !event.modifiers?.alt
-      && this.handle.is_focused() && this.selection) {
+      // The empty comment box takes focus after a line click; copying from it
+      // would copy nothing, so the selected source lines win there too.
+      && (this.handle.is_focused() || (this.editorFocused && !this.editor.value())) && this.selection) {
       const file = this.data?.snapshot.files.find(file => file.path === this.open);
       if (file) { this.copyText(copiedSelection(file, this.selection), cx); cx.stop_propagation(); }
       return;
@@ -615,7 +617,7 @@ export default class Annotator extends View {
     if (event.key === "escape") {
       if (this.reviewSendOpen) this.cancelReviewSend(cx);
       this.requeue = null; this.exportText = null; this.orderModelOpen = false;
-      this.reviewOptionsOpen = false; this.fileActionsOpen = false; this.scopeMenuOpen = false; cx.notify();
+      this.reviewOptionsOpen = false; this.fileActionsOpen = false; this.scopeMenuOpen = false; this.fileMenu = null; cx.notify();
     }
   }
 
@@ -991,7 +993,7 @@ export default class Annotator extends View {
   async openInEditor(file, cx) {
     const scope = this.data?.snapshot.scope;
     if (!file || !scope || file.status.includes("D")) return;
-    const line = editorLine(file, this.selection);
+    const line = editorLine(file, file.path === this.open ? this.selection : null);
     try {
       let target = null;
       if (scope.machine) {
@@ -1005,6 +1007,34 @@ export default class Annotator extends View {
       if (out.code !== 0) throw new Error(out.stderr.trim() || `code exited ${out.code}`);
     } catch (e) { this.notice = `Cannot open in VS Code: ${e.message ?? e}`; }
     cx.notify();
+  }
+
+  // File rows with a right-click menu. Deferred rows cannot hold handlers, so
+  // the list reports the row and the wrapper the press position.
+  fileList(id, files, count, draftPaths, t) {
+    const menu = this.fileMenu?.list === id ? files.find(f => f.path === this.fileMenu.path) : null;
+    const item = (key, label, action, enabled = true) => h_flex().id(`file-menu-${key}`).h(28).px(10).items_center().rounded(5).text_size(12)
+      .text_color(enabled ? t.foreground : t.dim)
+      .when(enabled, el => el.cursor_pointer().hover(s => s.bg(t.hover))
+        .on_click((_e, cx) => { this.fileMenu = null; action(cx); }))
+      .child(label);
+    return v_flex().id(`${id}-frame`).relative().size_full().min_h(0)
+      .on_mouse_down("left", (_e, cx) => { if (this.fileMenu) { this.fileMenu = null; cx.notify(); } })
+      .on_mouse_down("right", event => { if (this.fileMenu) this.fileMenu.at ??= event.local_position; })
+      .child(v_virtual_list(id, files.length, 42, index => files[index].path,
+        range => files.slice(range.start, range.end).map(f => this.fileRow(f, count(f.path), t, draftPaths.has(f.path))))
+        .size_full().on_item_click((path, cx) => this.selectFile(path, cx))
+        .on_item_secondary_click((path, _event, cx) => {
+          this.fileMenu = files.some(f => f.path === path && !f.draftOnly) ? { list: id, path, at: null } : null; cx.notify();
+        }))
+      .child(Scrollbar.vertical(id).absolute().inset_0())
+      .when(Boolean(menu && this.fileMenu.at), el => el.child(v_flex().id(`${id}-menu`).absolute()
+        .left(Math.max(4, this.fileMenu.at.x - 4)).top(this.fileMenu.at.y + 2).w(190).p(4).gap(1)
+        .rounded(7).bg(t.popover ?? t.surface).border_1().border_color(t.border)
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .child(item("copy-path", "Copy path", cx => this.copyText(menu.path, cx)))
+        .child(item("copy-absolute", "Copy absolute path", cx => this.copyText(`${this.data.snapshot.scope.repo.replace(/\/$/, "")}/${menu.path}`, cx)))
+        .child(item("vscode", "Open in VS Code", cx => this.openInEditor(menu, cx), !menu.status.includes("D")))));
   }
 
   loadLargeDiff(cx) {
@@ -1410,19 +1440,14 @@ export default class Annotator extends View {
         .on_resize((sizes, cx) => { this.sizes = sizes; setShared("annotator.sections", sizes); cx.notify(); })
         .child(resizable_panel().size(this.sizes[0]).size_range(50).visible(this.view === "diff" && this.filesOpen && files.length > 0)
           .child(this.view === "diff" && this.filesOpen ? v_flex().id("review-files").relative().size_full().min_h(0)
-            .child(v_virtual_list("review-files-list", files.length, 42,
-              index => files[index].path,
-              range => files.slice(range.start, range.end).map(f => this.fileRow(f, commentCounts.get(f.path) ?? 0, t, draftPaths.has(f.path))))
-              .size_full().on_item_click((path, cx) => this.selectFile(path, cx)))
-            .child(Scrollbar.vertical("review-files-list").absolute().inset_0()) : div()))
+            .child(this.fileList("review-files-list", files, path => commentCounts.get(path) ?? 0, draftPaths, t)) : div()))
         .child(resizable_panel().size(this.sizes[1]).size_range(90).child(v_flex().size_full().min_h(0)
       .when(this.view === "diff", el => el
         .when(Boolean(file), el => el.child(v_flex().flex_none().px(12).py(7).gap(3).border_t(1).border_b(1).border_color(t.border)
           .child(h_flex().gap(6).items_center().child(this.selectableText("review-file-name", source?.name ?? "").flex_1().min_w(0).truncate().font_semibold().text_size(12.5))
             .when(stats?.added > 0, el => el.child(this.badge(`+${stats.added}`, t.ansi2)))
             .when(stats?.removed > 0, el => el.child(this.badge(`−${stats.removed}`, t.ansi1)))
-            .child(this.button("copy-file-path", "Copy path", cx => this.copyText(file.path, cx)).tooltip(file.path))
-            .child(this.button("open-in-vscode", "VS Code", cx => this.openInEditor(file, cx), !file.status.includes("D")).tooltip("Open in VS Code at this line")))
+            )
           .when(Boolean(source?.folder), el => el.child(div().text_size(10.5).text_color(t.dim).truncate().child(source.folder)))
           .child(h_flex().gap(4)
             .child(this.button("context-more", "+20 context", cx => this.expandContext(Math.min(1000000, this.contextLines + 20), cx), this.contextLines < 1000000))

@@ -86,59 +86,72 @@ export function renderFull(self, cx) {
   const target = self.currentSession(), unread = comments.filter(c => !c.read).length + threads.filter(c => !c.read).length;
   const sendBlocked = deliveryBlocker(target, reviewDrafts, self.reviewNote.uncertain);
   const listId = `full-diff-${file?.path ?? "empty"}-${self.diffStyle}`;
+  const renderEntry = entry => {
+    if (entry.gap) return div().w_full().min_h(30).px(14).py(6).bg(t.raised).text_color(t.accent).cursor_pointer().child(entry.gap);
+    if (entry.row) return diffRow(entry.row, split, selection, t, font, marks, self, highlights);
+    return entry.comments.length ? v_flex().children(entry.comments.map(comment => inlineNote(comment, comment.id === self.activeComment, t, self))) : div().h(0);
+  };
+  const itemClick = (key, cx) => {
+    if (!file || self.open !== file.path || self.data?.snapshot.revision !== snapshot.revision) return;
+    const down = self.diffPress?.event.local_position, up = self.diffRelease?.local_position;
+    if (down && up && Math.hypot(up.x - down.x, up.y - down.y) > 3) return;
+    const entry = byKey.get(key);
+    if (!entry) return;
+    if (entry.gap) { self.expandContext(Math.min(1000000, self.contextLines + 20), cx); return; }
+    if (entry.comments) {
+      if (!entry.comments.length) return;
+      if (hasDraft) { self.notice = "Save or cancel your draft before opening a comment."; cx.notify(); return; }
+      const comment = entry.comments[0];
+      self.activeCommentIds = entry.comments.map(comment => comment.id);
+      // Keep readonly text mounted for word/drag selection. Editing is an
+      // explicit action, not a side effect of trying to copy a comment.
+      self.activeComment = comment.id; self.composerOpen = false; self.selection = null; cx.notify();
+      return;
+    }
+    if (file.truncated) return;
+    const item = entry.row;
+    const captured = self.diffPress;
+    const press = captured?.path === file.path && captured?.revision === snapshot.revision ? captured.event : null;
+    let row = item;
+    if (split) {
+      if (!press?.bounds || !press?.local_position) return;
+      row = splitSelectionRow(item, press.local_position.x < press.bounds.width / 2 ? "old" : "new");
+    }
+    if (row && (row.old != null || row.new != null)) self.selectLine(row, press, cx);
+    self.diffPress = null;
+  };
+  const itemSecondary = (key, event, cx) => {
+    if (!file || self.open !== file.path || self.data?.snapshot.revision !== snapshot.revision) return;
+    const entry = byKey.get(key);
+    if (!entry?.row || file.truncated) return;
+    const item = entry.row;
+    if (item.kind === "hunk") { self.beginQuestion({ kind: "hunk", row: split ? item.sourceIndex : file.rows.indexOf(item) }, cx); return; }
+    const captured = self.diffPress?.path === file.path && self.diffPress?.revision === snapshot.revision ? self.diffPress.event : null;
+    const press = event?.bounds && event?.local_position ? event : captured;
+    const row = split ? press?.bounds && press?.local_position
+      ? splitSelectionRow(item, press.local_position.x < press.bounds.width / 2 ? "old" : "new") : null : item;
+    if (row?.old != null || row?.new != null) {
+      const side = row.new != null ? "new" : "old", line = row[side];
+      self.beginQuestion({ kind: "selection", selection: { side, start: line, end: line } }, cx);
+    }
+    self.diffPress = null;
+  };
+  // Rows in GPUI's lazy list cannot hold handlers, including the native text
+  // view's copy action: text highlights there but Cmd/Ctrl+C copies nothing.
+  // Ordinary diffs render eagerly; only very large ones use the lazy list.
+  const eager = entries.length <= (self.eagerRowLimit ?? 1500);
+  const rowsView = eager
+    ? v_flex().id(listId).size_full().overflow_y_scroll().children(entries.map(entry => div().id(`entry-${entry.key}`).w_full()
+      .on_click((_e, cx) => itemClick(entry.key, cx))
+      .on_mouse_down("right", (event, cx) => itemSecondary(entry.key, event, cx))
+      .child(renderEntry(entry))))
+    : list(listId, entries.length, index => entries[index].key, index => renderEntry(entries[index]))
+      .size_full().on_item_click(itemClick).on_item_secondary_click(itemSecondary);
   const diff = v_flex().id("full-diff-frame").relative().flex_1().min_h(0)
     .on_mouse_down("left", event => { self.diffPress = { event, path: file?.path, revision: snapshot?.revision }; self.diffRelease = null; })
     .on_mouse_down("right", event => { self.diffPress = { event, path: file?.path, revision: snapshot?.revision }; })
     .on_mouse_up("left", event => { self.diffRelease = event; })
-    .child(list(listId, entries.length, index => entries[index].key, index => {
-      const entry = entries[index];
-      if (entry.gap) return div().w_full().min_h(30).px(14).py(6).bg(t.raised).text_color(t.accent).cursor_pointer().child(entry.gap);
-      if (entry.row) return diffRow(entry.row, split, selection, t, font, marks, self, highlights);
-      return entry.comments.length ? v_flex().children(entry.comments.map(comment => inlineNote(comment, comment.id === self.activeComment, t, self))) : div().h(0);
-    })
-      .size_full().on_item_click((key, cx) => {
-        if (!file || self.open !== file.path || self.data?.snapshot.revision !== snapshot.revision) return;
-        const down = self.diffPress?.event.local_position, up = self.diffRelease?.local_position;
-        if (down && up && Math.hypot(up.x - down.x, up.y - down.y) > 3) return;
-        const entry = byKey.get(key);
-        if (!entry) return;
-        if (entry.gap) { self.expandContext(Math.min(1000000, self.contextLines + 20), cx); return; }
-        if (entry.comments) {
-          if (!entry.comments.length) return;
-          if (hasDraft) { self.notice = "Save or cancel your draft before opening a comment."; cx.notify(); return; }
-          const comment = entry.comments[0];
-          self.activeCommentIds = entry.comments.map(comment => comment.id);
-          // Keep readonly text mounted for word/drag selection. Editing is an
-          // explicit action, not a side effect of trying to copy a comment.
-          self.activeComment = comment.id; self.composerOpen = false; self.selection = null; cx.notify();
-          return;
-        }
-        if (file.truncated) return;
-        const item = entry.row;
-        const captured = self.diffPress;
-        const press = captured?.path === file.path && captured?.revision === snapshot.revision ? captured.event : null;
-        let row = item;
-        if (split) {
-          if (!press?.bounds || !press?.local_position) return;
-          row = splitSelectionRow(item, press.local_position.x < press.bounds.width / 2 ? "old" : "new");
-        }
-        if (row && (row.old != null || row.new != null)) self.selectLine(row, press, cx);
-        self.diffPress = null;
-      }).on_item_secondary_click((key, cx) => {
-        if (!file || self.open !== file.path || self.data?.snapshot.revision !== snapshot.revision) return;
-        const entry = byKey.get(key);
-        if (!entry?.row || file.truncated) return;
-        const item = entry.row;
-        if (item.kind === "hunk") { self.beginQuestion({ kind: "hunk", row: split ? item.sourceIndex : file.rows.indexOf(item) }, cx); return; }
-        const press = self.diffPress?.path === file.path && self.diffPress?.revision === snapshot.revision ? self.diffPress.event : null;
-        const row = split ? press?.bounds && press?.local_position
-          ? splitSelectionRow(item, press.local_position.x < press.bounds.width / 2 ? "old" : "new") : null : item;
-        if (row?.old != null || row?.new != null) {
-          const side = row.new != null ? "new" : "old", line = row[side];
-          self.beginQuestion({ kind: "selection", selection: { side, start: line, end: line } }, cx);
-        }
-        self.diffPress = null;
-      }))
+    .child(rowsView)
     .child(Scrollbar.vertical(listId).absolute().inset_0());
 
   const main = v_flex().size_full().min_w(0).min_h(0)
@@ -160,8 +173,6 @@ export function renderFull(self, cx) {
            .when(Boolean(selection), el => el.child(self.button("copy-full-source-selection", "Copy lines", cx => self.copyText(copiedSelection(file, selection), cx))))
           .child(self.button("full-prev-file", "‹", cx => self.selectFile(files[fileIndex - 1].path, cx), fileIndex > 0))
           .child(self.button("full-next-file", "›", cx => self.selectFile(files[fileIndex + 1].path, cx), fileIndex >= 0 && fileIndex + 1 < files.length))
-          .child(self.button("copy-full-file-path", "Copy path", cx => self.copyText(file.path, cx), Boolean(file)).tooltip(file?.path ?? ""))
-          .child(self.button("full-open-in-vscode", "VS Code", cx => self.openInEditor(file, cx), Boolean(file) && !file.status.includes("D")).tooltip("Open in VS Code at this line"))
           .child(self.button("full-file-actions", "File ▾", cx => { self.fileActionsOpen = !self.fileActionsOpen; cx.notify(); })))
         .when(self.fileActionsOpen, el => el.child(h_flex().id("full-file-options").px(10).py(4).gap(4).flex_wrap().items_center()
           .child(self.button("full-context-more", "+20 context", cx => self.expandContext(Math.min(1000000, self.contextLines + 20), cx), Boolean(file) && self.contextLines < 1000000))
@@ -261,11 +272,8 @@ export function renderFull(self, cx) {
     .child(h_resizable(self.commentsOpen ? "annotator-reader-with-comments" : "annotator-reader").flex_1().min_h(0)
       .on_resize((sizes, cx) => { self.fullWidths = sizes.slice(0, 2); self.commentWidth = sizes[2] ?? self.commentWidth; setShared("annotator.fullWidths", sizes); cx.notify(); })
       .child(resizable_panel().size(self.fullWidths[0]).size_range(160, 500).visible(self.filesOpen)
-        .child(v_flex().relative().size_full().min_h(0).bg(t.chrome)
-          .child(v_virtual_list("full-files", files.length, 42, index => files[index].path,
-            range => files.slice(range.start, range.end).map(f => self.fileRow(f, counts.get(f.path) ?? 0, t, draftPaths.has(f.path))))
-            .size_full().on_item_click((path, cx) => self.selectFile(path, cx)))
-          .child(Scrollbar.vertical("full-files").absolute().inset_0())))
+        .child(div().size_full().min_h(0).bg(t.chrome)
+          .child(self.fileList("full-files", files, path => counts.get(path) ?? 0, draftPaths, t))))
       .child(resizable_panel().size(self.fullWidths[1]).size_range(300).child(main))
       .when(self.commentsOpen, el => el.child(resizable_panel().size(self.commentWidth).size_range(280, 600).child(inspector()))))
     .when(Boolean(self.questionDraft), el => el.child(self.questionComposer()))

@@ -110,6 +110,8 @@ function harness() {
   vm.runInNewContext(full, context);
   vm.runInNewContext(source, context);
   const mod = new context.Annotator();
+  // Most reader tests drive the lazy list used for very large diffs.
+  mod.eagerRowLimit = 0;
   const drain = async () => { while (jobs.length) await Promise.all(jobs.splice(0)); };
   return { mod, nodes, requests, state, cx, drain, snapshot };
 }
@@ -431,6 +433,27 @@ test("plain and highlighted diff source use selectable native text", async () =>
   }
 });
 
+test("ordinary full-review diffs render eager rows so native text copy works", async () => {
+  const h = harness(); h.state.props = { presentation: "full" };
+  h.mod.init({}, h.cx); await h.drain(); h.mod.eagerRowLimit = 1500;
+  h.mod.syntax = false; h.nodes.length = 0; h.mod.render(h.cx);
+  assert.equal(h.state.diffList, undefined, "no lazy list for a small diff");
+  const row = h.nodes.find(n => n.id === "entry-row-0");
+  assert.ok(row?.events.on_click, "rows hold handlers, which the lazy list forbids");
+  assert.ok((h.state.textViews ?? []).some(v => v.id.startsWith("code-source-")), "source is native selectable text");
+  h.mod.eagerRowLimit = 0; h.nodes.length = 0; h.mod.render(h.cx);
+  assert.ok(h.state.diffList, "very large diffs keep the lazy list");
+});
+
+test("Cmd/Ctrl+C copies selected lines while the empty comment box has focus", async () => {
+  const h = harness(); h.mod.init({}, h.cx); await h.drain();
+  h.mod.data.snapshot.files[0].rows = [{ kind: "add", old: null, new: 2, text: "changed" }];
+  h.mod.selection = { side: "new", start: 2, end: 2 };
+  h.mod.editor.focus();
+  h.mod.handleKey({ key: "c", keystroke: "cmd-c", modifiers: {} }, h.cx);
+  assert.equal(h.state.clipboard, "changed");
+});
+
 test("Cmd/Ctrl+C copies the selected source range without gutters or diff markers", async () => {
   const h = harness(); h.mod.init({}, h.cx); await h.drain();
   h.mod.data.snapshot.files[0].rows = [
@@ -569,10 +592,12 @@ test("full split-diff right-click preserves the old side and original hunk index
   h.mod.render(h.cx);
   const list = h.nodes.filter(n => n.id === h.state.diffList.id).at(-1);
   const frame = h.nodes.filter(n => n.id === "full-diff-frame").at(-1);
+  // GPUI reports the row-relative press to the list handler before the frame
+  // sees it bubble, so the side must come from that event.
+  list.events.on_item_secondary_click("row-1", { bounds: { width: 1000 }, local_position: { x: 10 } }, h.cx);
   frame.events.on_mouse_down({ bounds: { width: 1000 }, local_position: { x: 10 } });
-  list.events.on_item_secondary_click("row-1", h.cx);
   assert.equal(h.mod.questionDraft.context.selection.side, "old");
-  h.mod.questions.clear(); list.events.on_item_secondary_click("row-2", h.cx);
+  h.mod.questions.clear(); list.events.on_item_secondary_click("row-2", {}, h.cx);
   assert.equal(h.mod.questionDraft.context.kind, "hunk");
   assert.equal(h.mod.questionDraft.context.row, 3);
   assert.equal(h.requests.filter(r => r.op === "ask").length, 0);
@@ -1241,23 +1266,39 @@ test("split rows pair unequal changes and never cross hunks", () => {
   assert.equal(review.splitSelectionRow(split[3], "new").old, null);
 });
 
-for (const full of [false, true]) test(`${full ? "full" : "sidebar"} copies the file path and opens VS Code at the selected line`, async () => {
+for (const full of [false, true]) test(`${full ? "full" : "sidebar"} file right-click copies paths and opens VS Code`, async () => {
   const h = harness(); h.state.props = full ? { presentation: "full" } : {};
   const execs = [];
   h.state.scope = { repo: "/checkout", machine: "manjaro" };
   h.mod.init({}, h.cx); await h.drain();
   h.mod.selection = { side: "new", start: 2, end: 2 };
-  h.nodes.length = 0; h.mod.render(h.cx);
-  h.nodes.find(n => n.id === (full ? "copy-full-file-path" : "copy-file-path")).events.on_click(null, h.cx);
-  assert.equal(h.state.clipboard, "a.rs");
+  const listId = full ? "full-files" : "review-files-list";
+  const open = () => {
+    h.nodes.length = 0; h.mod.render(h.cx);
+    h.nodes.find(n => n.id === listId).events.on_item_secondary_click("a.rs", {}, h.cx);
+    h.nodes.find(n => n.id === `${listId}-frame`).events.on_mouse_down({ local_position: { x: 40, y: 20 } });
+    h.nodes.length = 0; h.mod.render(h.cx);
+  };
+  for (const id of ["copy-file-path", "open-in-vscode", "copy-full-file-path", "full-open-in-vscode"])
+    assert.ok(!h.nodes.some(n => n.id === id), `${id} moved to the file menu`);
+  open();
+  assert.ok(h.nodes.some(n => n.id === `${listId}-menu`));
+  h.nodes.find(n => n.id === "file-menu-copy-path").events.on_click(null, h.cx);
+  assert.equal(h.state.clipboard, "a.rs"); assert.equal(h.mod.fileMenu, null);
+  open();
+  h.nodes.find(n => n.id === "file-menu-copy-absolute").events.on_click(null, h.cx);
+  assert.equal(h.state.clipboard, "/checkout/a.rs");
   h.state.exec = (cmd, args) => {
     execs.push([cmd, args]);
     return cmd === "hc" ? { code: 0, stdout: JSON.stringify({ machines: [{ name: "manjaro", target: "box", via: false }] }), stderr: "" }
       : { code: 0, stdout: "", stderr: "" };
   };
-  h.nodes.find(n => n.id === (full ? "full-open-in-vscode" : "open-in-vscode")).events.on_click(null, h.cx);
+  open();
+  h.nodes.find(n => n.id === "file-menu-vscode").events.on_click(null, h.cx);
   await new Promise(setImmediate);
   assert.deepEqual(execs.at(-1), ["code", ["--remote", "ssh-remote+box", "/checkout", "-g", "/checkout/a.rs:2"]]);
+  open(); h.mod.handleKey({ key: "escape" }, h.cx);
+  assert.equal(h.mod.fileMenu, null, "Escape closes the menu");
   assert.equal(h.requests.filter(r => ["send", "ask"].includes(r.op)).length, 0);
 });
 
