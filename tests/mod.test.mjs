@@ -1331,7 +1331,7 @@ test("sidebar uses a native comparison select with a floating menu", async () =>
   assert.ok(h.nodes.some(n => n.id === "files-scope-row"));
   assert.ok(!h.nodes.some(n => n.id === "scope-options"));
   assert.ok(!h.nodes.some(n => n.children.includes("Working tree")));
-  assert.ok(h.nodes.some(n => n.id === "sidebar-scope-select"));
+  assert.ok(h.nodes.some(n => n.id === "sidebar-scope-switch"));
   assert.ok(!h.nodes.some(n => n.id === "scope-menu"));
   h.nodes.filter(n => n.id === "scope-branch").at(-1).events.on_click(null, h.cx);
   await h.drain();
@@ -1341,7 +1341,7 @@ test("sidebar uses a native comparison select with a floating menu", async () =>
 
 test("sidebar combines Files and comparison and keeps ordering behind Options", async () => {
   const h = harness(); h.mod.init({}, h.cx); await h.drain(); h.mod.render(h.cx);
-  for (const id of ["files-scope-row", "toggle-files", "sidebar-scope-select", "sidebar-options"])
+  for (const id of ["files-scope-row", "toggle-files", "sidebar-scope-switch", "sidebar-options"])
     assert.ok(h.nodes.some(n => n.id === id), id);
   for (const id of ["comparison-controls", "sidebar-options-panel", "order-logically"])
     assert.ok(!h.nodes.some(n => n.id === id), id);
@@ -1353,10 +1353,24 @@ test("sidebar combines Files and comparison and keeps ordering behind Options", 
   assert.equal(h.requests.length, before);
 });
 
+test("comparison switch changes scope in one click and disables Last commit without HEAD", async () => {
+  for (const full of [false, true]) {
+    const h = harness(); h.state.props = full ? { presentation: "full" } : {};
+    h.mod.init({}, h.cx); await h.drain();
+    h.mod.mode = "uncommitted"; h.nodes.length = 0; h.mod.render(h.cx);
+    const id = name => `${full ? "full-" : ""}scope-${name}`;
+    assert.equal(h.nodes.find(n => n.id === id(full ? "local" : "uncommitted")).events.on_click, undefined, "active segment is inert");
+    h.nodes.find(n => n.id === id("branch")).events.on_click(null, h.cx); await h.drain();
+    assert.equal(h.requests.at(-1).scope.comparison.mode, "branch");
+    h.mod.data.snapshot.head = null; h.nodes.length = 0; h.mod.render(h.cx);
+    assert.equal(h.nodes.find(n => n.id === id("last-commit")).events.on_click, undefined);
+  }
+});
+
 test("full comparison select stays in the header and View options groups settings", async () => {
   const h = harness(); h.state.props = { presentation: "full" };
   h.mod.init({}, h.cx); await h.drain(); h.mod.render(h.cx);
-  for (const id of ["full-scope-select", "full-scope-local", "full-scope-last-commit", "full-scope-branch"])
+  for (const id of ["full-scope-switch", "full-scope-local", "full-scope-last-commit", "full-scope-branch"])
     assert.ok(h.nodes.some(n => n.id === id), id);
   assert.ok(!h.nodes.some(n => n.id === "full-scope-menu"));
   const before = h.requests.length;
@@ -1381,33 +1395,6 @@ test("base picker and View options are mutually exclusive and closing preserves 
   assert.equal(h.mod.baseOpen, false);
   assert.equal(h.mod.mode, mode); assert.equal(h.mod.base, base);
   assert.equal(h.requests.length, before);
-});
-
-test("comparison select supports keyboard navigation, confirmation and dismissal", async () => {
-  const h = harness(); h.state.props = { presentation: "full" };
-  h.mod.init({}, h.cx); await h.drain(); h.mod.render(h.cx);
-  h.nodes.find(n => n.id === "full-scope-select-trigger").events.on_click({}, h.cx);
-  assert.equal(h.mod.scopeMenuOpen, true);
-  h.nodes.length = 0; h.mod.render(h.cx);
-  h.nodes.find(n => n.id === "full-scope-list").events.on_key_down({ key: "home" }, h.cx);
-  assert.equal(h.mod.scopeHighlight, 0);
-  h.nodes.find(n => n.id === "full-scope-select").events.on_confirm({}, h.cx);
-  await h.drain();
-  assert.equal(h.mod.mode, "uncommitted"); assert.equal(h.mod.scopeMenuOpen, false);
-  h.nodes.length = 0; h.mod.render(h.cx);
-  const root = h.nodes.find(n => n.id === "full-scope-select"), before = h.requests.length;
-  root.events.on_open_change(true, h.cx);
-  root.events.on_open_change(false, h.cx);
-  assert.equal(h.mod.scopeMenuOpen, false);
-  assert.equal(h.requests.length, before, "dismissal must not change comparison");
-});
-
-test("comparison select skips Last commit when HEAD is missing", async () => {
-  const h = harness(); h.mod.init({}, h.cx); await h.drain();
-  h.mod.data.snapshot.head = null; h.mod.render(h.cx);
-  h.nodes.find(n => n.id === "sidebar-scope-select-trigger").events.on_click({}, h.cx);
-  h.nodes.find(n => n.id === "sidebar-scope-list").events.on_key_down({ key: "down" }, h.cx);
-  assert.equal(h.mod.scopeHighlight, 2);
 });
 
 test("full reader defaults to two columns with inline notes and an on-demand composer", async () => {

@@ -239,7 +239,7 @@ export function renderFull(self, cx) {
         .child(h_flex().min_w(0).gap(4).text_size(11).text_color(t.dim)
           .child(div().flex_none().child(`${snapshot?.scope.machine ?? "local"} ·`))
           .child(self.selectableText("full-checkout-path", snapshot?.scope.repo ?? "").min_w(0).truncate())))
-      .child(self.comparisonSelect("full", snapshot))
+      .child(self.comparisonSwitch("full", snapshot))
       .when(self.mode === "branch", el => el.child(self.button("full-base", self.baseLabel(), cx => self.openBasePicker(cx)).max_w(180).truncate().tooltip(self.base ?? "Choose base branch")))
       .child(self.button("full-review-options", "View options", cx => { self.reviewOptionsOpen = !self.reviewOptionsOpen; self.baseOpen = false; self.scopeMenuOpen = false; cx.notify(); }, true, self.reviewOptionsOpen ? "secondary" : "quiet"))
       .child(self.button("full-refresh", self.busy ? "…" : "↻", cx => { self.refresh(cx, true); self.refreshGithub(cx, true); }).tooltip("Refresh diff and GitHub")))

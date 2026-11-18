@@ -1,5 +1,5 @@
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, v_resizable, resizable_panel, v_virtual_list, Scrollbar, TextareaState, Textarea, TextView, InputState, Input, Select, Popup } from "gpui-base";
+import { v_flex, h_flex, v_resizable, resizable_panel, v_virtual_list, Scrollbar, TextareaState, Textarea, TextView, InputState, Input } from "gpui-base";
 import { spaces, panes, focused, agents, exec, home, props, theme, settings, shared, setShared, run, layout, appHome, watchFolder, machines, nextCommand } from "herdr";
 import { selectionFor, selectionPayload, selected, inlineAt, pendingComments, sessionTarget, fileStats, pathParts, commentStatus, commentLocation, reviewSummary, sendHint, unreadItems, visibleComments, layoutSidebar, reviewSidebarTransition, fullPreferences, snapshotFailure, needsFreshSnapshot, savedBaseChoice } from "./review.js";
 import { renderFull } from "./full.js";
@@ -64,7 +64,6 @@ export default class Annotator extends View {
     this.blankReviewNote = this.createReviewNote();
     this.ensureReviewNote(contextKey());
     this.handle = cx.focus_handle();
-    this.scopeTriggerFocus = cx.focus_handle(); this.scopeListFocus = cx.focus_handle();
     this.updates = new UpdateController({ exec, shared, setShared, storage: sessionStorage,
       script: `${home()}/.local/share/herdr-annotator/update.py`, appHome: appHome(),
       ready: cx => { if (!this.closed && !this.data && !this._busy) this.refresh(cx); } });
@@ -333,67 +332,30 @@ export default class Annotator extends View {
 
   baseLabel() { return this.baseExplicit ? this.base ?? "Base…" : this.base ? `Auto: ${this.base}` : "Auto"; }
 
-  comparisonSelect(prefix, snapshot) {
-    const t = theme();
+  // One click per comparison: a segmented control instead of a menu. The
+  // sidebar uses short labels; full review spells them out.
+  comparisonSwitch(prefix, snapshot) {
+    const t = theme(), full = prefix === "full";
     const options = [
-        ["uncommitted", prefix === "full" ? "local" : "uncommitted", "Uncommitted", "Staged, unstaged and new files"],
-        ["last_commit", "last-commit", "Last commit", "Latest commit plus uncommitted changes"],
-        ["branch", "branch", "Branch", "Changes since the base branch, plus uncommitted changes"],
+      ["uncommitted", full ? "local" : "uncommitted", full ? "Uncommitted" : "Local", "Uncommitted: staged, unstaged and new files"],
+      ["last_commit", "last-commit", full ? "Last commit" : "Last", "Latest commit plus uncommitted changes"],
+      ["branch", "branch", "Branch", "Changes since the base branch, plus uncommitted changes"],
     ];
-    const enabled = index => !this.busy && (options[index][0] !== "last_commit" || !snapshot || Boolean(snapshot.head));
-    const setOpen = (open, cx) => {
-      this.scopeMenuOpen = open;
-      if (open) {
-        this.scopeHighlight = Math.max(0, options.findIndex(([mode]) => mode === this.mode));
-        this.baseOpen = false; this.reviewOptionsOpen = false; this.scopeListFocus.focus();
-      } else this.scopeTriggerFocus.focus();
-      cx.notify();
-    };
-    const choose = (index, cx) => {
-      if (!enabled(index)) return;
-      const mode = options[index][0];
-      setOpen(false, cx);
-      if (mode !== this.mode) this.changeComparison(mode, mode === "branch" ? this.base : null, cx);
-    };
-    const trigger = h_flex().id(`${prefix}-scope-select-trigger`).h(29).w(148).px(9).gap(8).items_center().rounded(6)
-      .bg(t.surface).border_1().border_color(this.scopeMenuOpen ? t.accent : t.border).text_size(12)
-      .child(div().flex_1().child(options.find(([mode]) => mode === this.mode)?.[2] ?? "Compare"))
-      .child(div().text_color(t.dim).child("▾"))
-      .when(!this.busy, el => el.cursor_pointer().hover(s => s.bg(t.hover)).on_click((_event, cx) => {
-        cx.stop_propagation(); setOpen(!this.scopeMenuOpen, cx);
+    return h_flex().id(`${prefix}-scope-switch`).flex_none().p(2).gap(2).rounded(7).bg(t.background).border_1().border_color(t.border)
+      .role("radio_group").accessibility_label("Comparison scope")
+      .children(options.map(([mode, id, label, help]) => {
+        const active = this.mode === mode;
+        const enabled = !this.busy && (mode !== "last_commit" || !snapshot || Boolean(snapshot.head));
+        return h_flex().id(`${full ? "full-" : ""}scope-${id}`).h(full ? 24 : 22).px(full ? 9 : 7).items_center().rounded(5)
+          .text_size(full ? 12 : 11).role("radio_button").aria_selected(active)
+          .bg(active ? t.surface : t.background).text_color(active ? t.accent : enabled ? t.foreground : t.dim)
+          .when(active, el => el.font_semibold().border_1().border_color(t.border))
+          .when(enabled && !active, el => el.cursor_pointer().hover(s => s.bg(t.hover))
+            .on_click((_e, cx) => this.changeComparison(mode, mode === "branch" ? this.base : null, cx)))
+          .tooltip(help).child(label);
       }));
-    const menu = v_flex().id(`${prefix}-scope-list`).w(310).p(4).gap(2).rounded(8).bg(t.surface).border_1().border_color(t.border)
-      .role("list_box").accessibility_label("Comparison scope").track_focus(this.scopeListFocus)
-      .on_key_down((event, cx) => {
-        const key = event.key?.toLowerCase();
-        if (!["up", "down", "arrowup", "arrowdown", "home", "end"].includes(key)) return;
-        cx.stop_propagation();
-        let index = this.scopeHighlight ?? 0;
-        const step = key === "up" || key === "arrowup" || key === "end" ? -1 : 1;
-        if (key === "home") index = -1;
-        if (key === "end") index = options.length;
-        for (let n = 0; n < options.length; n++) {
-          index = (index + step + options.length) % options.length;
-          if (enabled(index)) break;
-        }
-        this.scopeHighlight = index; cx.notify();
-      })
-      .children(options.map(([mode, id, label, help], index) => v_flex()
-        .id(`${prefix === "full" ? "full-" : ""}scope-${id}`).px(9).py(7).gap(3).rounded(5)
-        .role("list_box_option").aria_selected(this.mode === mode).when(this.scopeHighlight === index, el => el.aria_active_descendant().bg(t.selected))
-        .text_color(enabled(index) ? t.foreground : t.dim)
-        .child(h_flex().gap(8).items_center().text_size(12)
-          .child(div().flex_1().font_semibold().child(label))
-          .child(div().text_color(t.accent).child(this.mode === mode ? "✓" : "")))
-        .child(div().text_size(11).text_color(t.dim).child(help))
-        .when(enabled(index), el => el.cursor_pointer().hover(s => s.bg(t.hover)).on_click((_event, cx) => { cx.stop_propagation(); choose(index, cx); }))));
-    return Select.new(`${prefix}-scope-select`).accessibility_label("Comparison scope").open(this.scopeMenuOpen)
-      .track_focus(this.scopeTriggerFocus).content_focus_handle(this.scopeListFocus)
-      .on_open_change((open, cx) => setOpen(open && !this.busy, cx))
-      .on_confirm((_event, cx) => choose(this.scopeHighlight ?? 0, cx))
-      .child(Popup.new(`${prefix}-scope-popup`, trigger).anchor("top_right")
-        .when(this.scopeMenuOpen, el => el.content(menu)));
   }
+
 
   openBasePicker(cx) {
     this.baseOpen = !this.baseOpen; this.scopeMenuOpen = false;
@@ -1453,7 +1415,7 @@ export default class Annotator extends View {
         .when(this.view === "diff" && Boolean(totals?.removed), el => el.child(this.badge(`−${totals.removed}`, t.ansi1)))
         .when(this.view !== "diff", el => el.child(this.button("filter-unread", this.onlyUnread ? "● Unread only" : "All comments", cx => { this.onlyUnread = !this.onlyUnread; cx.notify(); })))
            .child(div().flex_1().min_w(0))
-           .child(this.comparisonSelect("sidebar", data?.snapshot)))
+           .child(this.comparisonSwitch("sidebar", data?.snapshot)))
           .when(this.mode === "branch", el => el.child(h_flex().px(8).pb(4).items_center().gap(5).flex_none().bg(t.chrome)
            .child(div().text_size(11).text_color(t.dim).child("Base"))
            .child(this.button("choose-base", this.baseLabel(), cx => this.openBasePicker(cx))

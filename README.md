@@ -72,7 +72,8 @@ according to its own behavior.
 comments, it opens the send composer; press again there to send. One press never
 saves and sends, or opens confirmation and submits it.
 
-The comparison select offers **Uncommitted**, **Last commit**, and **Branch**.
+One-click buttons switch between **Uncommitted**, **Last commit**, and **Branch**
+(short labels **Local · Last · Branch** in the sidebar).
 In full review it sits in the top bar, beside **View options**. In Branch mode,
 the base branch sits beside it (below it in the sidebar).
 **View options** groups file ordering, comment filters and code settings;
