@@ -1,7 +1,7 @@
 import { div, list } from "gpui-kit";
 import { v_flex, h_flex, h_resizable, resizable_panel, v_virtual_list, Scrollbar, Textarea } from "gpui-base";
 import { theme, settings, setShared } from "herdr";
-import { splitRows, splitSelectionRow, selected, pendingComments, unreadItems, visibleComments, fileStats, diffReaderEntries, commentStatus, commentLocation, deliveryBlocker, reviewTargetReady, contextGaps, copiedSelection, reviewTotals } from "./review.js";
+import { splitRows, splitSelectionRow, selected, pendingComments, unreadItems, visibleComments, fileStats, diffReaderEntries, commentStatus, commentLocation, deliveryBlocker, reviewTargetReady, contextGaps, copiedSelection, reviewTotals, entryText } from "./review.js";
 
 function pageCards(self, id, items, render) {
   self.cardPages ??= new Map();
@@ -141,8 +141,10 @@ export function renderFull(self, cx) {
   // Ordinary diffs render eagerly; only very large ones use the lazy list.
   const eager = entries.length <= (self.eagerRowLimit ?? 1500);
   const rowsView = eager
-    ? v_flex().id(listId).size_full().overflow_y_scroll().children(entries.map(entry => div().id(`entry-${entry.key}`).w_full()
+    ? v_flex().id(listId).size_full().overflow_y_scroll().children(entries.map((entry, index) => div().id(`entry-${entry.key}`).w_full()
       .on_click((_e, cx) => itemClick(entry.key, cx))
+      .on_mouse_down("left", event => self.dragStart(index, event))
+      .on_mouse_up("left", event => self.dragEnd(index, event, side => entries.map(entry => entryText(entry, side))))
       .on_mouse_down("right", (event, cx) => itemSecondary(entry.key, event, cx))
       .child(renderEntry(entry))))
     : list(listId, entries.length, index => entries[index].key, index => renderEntry(entries[index]))

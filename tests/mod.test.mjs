@@ -445,6 +445,18 @@ test("ordinary full-review diffs render eager rows so native text copy works", a
   assert.ok(h.state.diffList, "very large diffs keep the lazy list");
 });
 
+test("a drag over diff text hands the keyboard back so Cmd/Ctrl+C copies", async () => {
+  const h = harness(); h.mod.init({}, h.cx); await h.drain();
+  h.mod.editor.focus();
+  h.mod.dragStart(0, { position: { x: 0, y: 0 } });
+  h.mod.dragEnd(0, { position: { x: 80, y: 0 } }, () => ["changed line"]);
+  assert.equal(h.state.reviewFocused, true, "review pane regains the keyboard");
+  h.mod.handleKey({ key: "c", keystroke: "cmd-c", modifiers: {} }, h.cx);
+  assert.equal(h.state.clipboard, "changed line");
+  h.mod.dragStart(0, { position: { x: 5, y: 5 } }); h.mod.dragEnd(0, { position: { x: 5, y: 5 } }, () => ["x"]);
+  assert.equal(h.mod.dragCopyText, null, "a plain click is not a drag");
+});
+
 test("Cmd/Ctrl+C copies selected lines while the empty comment box has focus", async () => {
   const h = harness(); h.mod.init({}, h.cx); await h.drain();
   h.mod.data.snapshot.files[0].rows = [{ kind: "add", old: null, new: 2, text: "changed" }];

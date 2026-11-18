@@ -1,6 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { selectionFor, selectionPayload, selected, inlineAt, pendingComments, sessionTarget, fileStats, pathParts, commentStatus, commentLocation, reviewSummary, sendHint, visibleComments, unreadItems, snapshotFailure, diffReaderEntries, splitRows, contextGaps, reviewTargetReady, reviewTotals, editorLine, editorArgs } from "../mods/annotator/review.js";
+import { selectionFor, selectionPayload, selected, inlineAt, pendingComments, sessionTarget, fileStats, pathParts, commentStatus, commentLocation, reviewSummary, sendHint, visibleComments, unreadItems, snapshotFailure, diffReaderEntries, splitRows, contextGaps, reviewTargetReady, reviewTotals, editorLine, editorArgs, rangeText, entryText, dragSide } from "../mods/annotator/review.js";
+
+test("drag copy covers rows in either direction and skips headers and notes", () => {
+  const entries = [{ row: { kind: "hunk", text: "@@" } }, { row: { kind: "context", old: 1, new: 1, text: "a" } },
+    { comments: [] }, { row: { kind: "add", new: 2, text: "  b" } }];
+  const lines = entries.map(e => entryText(e));
+  assert.equal(rangeText(lines, 3, 0), "a\n  b");
+  const pair = { kind: "change", old: { text: "old" }, new: { text: "new" } };
+  assert.equal(entryText({ row: pair }, "old"), "old");
+  assert.equal(dragSide({ local_position: { x: 10 }, bounds: { width: 100 } }), "old");
+  assert.equal(dragSide({}), "new");
+});
 
 test("VS Code opens the selected or first changed line, remotely through Remote-SSH", () => {
   const file = { rows: [{ kind: "hunk" }, { kind: "context", old: 4, new: 4 }, { kind: "add", new: 5 }] };

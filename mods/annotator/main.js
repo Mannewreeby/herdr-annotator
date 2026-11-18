@@ -9,7 +9,7 @@ import { GithubRefresh } from "./github-refresh.js";
 import { reviewLocation } from "./review.js";
 import { UpdateController } from "./updates.js";
 import { escapeText, copiedDiff, copiedSelection, contextGaps } from "./review.js";
-import { reviewOrderKey, orderedReviewFiles, existingReviewTab, deliveryBlocker, reviewTargetReady, reviewedDraft, agentWaiting, reviewTotals, editorLine, editorArgs } from "./review.js";
+import { reviewOrderKey, orderedReviewFiles, existingReviewTab, deliveryBlocker, reviewTargetReady, reviewedDraft, agentWaiting, reviewTotals, editorLine, editorArgs, rangeText, entryText, dragSide } from "./review.js";
 
 function location() {
   const fixed = props();
@@ -598,10 +598,12 @@ export default class Annotator extends View {
   }
 
   handleKey(event, cx) {
-    if (["cmd-c", "ctrl-c"].includes(event.keystroke) && !event.modifiers?.shift && !event.modifiers?.alt
+    const copy = ["cmd-c", "ctrl-c"].includes(event.keystroke) && !event.modifiers?.shift && !event.modifiers?.alt
       // The empty comment box takes focus after a line click; copying from it
       // would copy nothing, so the selected source lines win there too.
-      && (this.handle.is_focused() || (this.editorFocused && !this.editor.value())) && this.selection) {
+      && (this.handle.is_focused() || (this.editorFocused && !this.editor.value()));
+    if (copy && this.dragCopyText) { this.copyText(this.dragCopyText, cx); cx.stop_propagation(); return; }
+    if (copy && this.selection) {
       const file = this.data?.snapshot.files.find(file => file.path === this.open);
       if (file) { this.copyText(copiedSelection(file, this.selection), cx); cx.stop_propagation(); }
       return;
@@ -1234,8 +1236,28 @@ export default class Annotator extends View {
     this.view = "diff"; this.refresh(cx, false, true); cx.notify();
   }
 
+  // Native text highlights on drag, but keyboard focus stays on the review
+  // pane and mods cannot read that selection, so Cmd/Ctrl+C would copy
+  // nothing. Track which rows a drag covered and copy their source lines.
+  dragStart(index, event) {
+    this.dragCopy = { index, at: event?.position ?? event?.local_position ?? null, side: dragSide(event) };
+    this.dragCopyText = null;
+  }
+
+  dragEnd(index, event, lines) {
+    const drag = this.dragCopy; this.dragCopy = null;
+    if (!drag) return;
+    const at = event?.position ?? event?.local_position;
+    const moved = index !== drag.index || (at && drag.at && Math.hypot(at.x - drag.at.x, at.y - drag.at.y) > 3);
+    this.dragCopyText = moved ? rangeText(lines(drag.side), drag.index, index) || null : null;
+    // The text view takes the keyboard on a drag and swallows Cmd/Ctrl+C
+    // without copying; hand the keyboard back so handleKey can copy.
+    if (this.dragCopyText) this.focusReview();
+  }
+
   selectLine(row, event, cx) {
     if (this.busy || this.editDraft || this.questionDraft) return;
+    this.dragCopyText = null;
     this.reviewSend = null;
     this.draft.anchor(selectionFor(this.selection, row, event?.modifiers?.shift), this.data?.snapshot.revision);
     this.activeComment = null; this.activeCommentIds = null; this.composerOpen = true;
@@ -1339,6 +1361,8 @@ export default class Annotator extends View {
             if (down && up && Math.hypot(up.x - down.x, up.y - down.y) > 3) return;
             this.selectLine(row, event, cx);
           }))
+        .on_mouse_down("left", event => this.dragStart(i, event))
+        .on_mouse_up("left", event => this.dragEnd(i, event, () => file.rows.map(row => entryText({ row }))))
         .when(selectable || row.kind === "hunk", el => el.on_mouse_down("right", (_event, cx) => {
           cx.stop_propagation();
           this.beginQuestion(row.kind === "hunk" ? { kind: "hunk", row: i }

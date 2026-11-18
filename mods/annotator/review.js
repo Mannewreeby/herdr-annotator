@@ -116,6 +116,27 @@ export function fileStats(file) {
     removed: file.rows.filter(r => r.kind === "delete").length };
 }
 
+// Source text of the rows a drag covered, in either direction. Null entries
+// (hunk headers, notes, context expanders) are left out.
+export function rangeText(lines, a, b) {
+  const [start, end] = a <= b ? [a, b] : [b, a];
+  return lines.slice(start, end + 1).filter(text => text != null).join("\n");
+}
+
+// Split view: a press in the left half copies the old side.
+export function dragSide(event) {
+  const x = event?.local_position?.x, width = event?.bounds?.width;
+  return Number.isFinite(x) && width ? (x < width / 2 ? "old" : "new") : "new";
+}
+
+// One diff entry's source text: a unified row, or one side of a split pair.
+export function entryText(entry, side = "new") {
+  const row = entry?.row;
+  if (!row || row.kind === "hunk" || row.kind === "meta") return null;
+  if ("sourceIndex" in row || row.kind === "change") return row[side]?.text ?? null;
+  return row.old != null || row.new != null ? row.text : null;
+}
+
 // The line to open: the selected new-side line, else the first added line.
 export function editorLine(file, selection) {
   if (selection?.side === "new") return selection.start;
