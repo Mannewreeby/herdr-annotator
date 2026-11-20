@@ -1,6 +1,8 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, v_resizable, resizable_panel, v_virtual_list, Scrollbar, TextareaState, Textarea, TextView, InputState, Input, ScrollHandle } from "gpui-base";
 import { spaces, panes, focused, agents, exec, home, props, theme, settings, shared, setShared, run, layout, appHome, watchFolder, machines, nextCommand } from "herdr";
+import { hc, checking, readTextFile } from "herdr";
+import { NvimBox, lineRuns, modeLabel } from "./nvim-box.js";
 import { selectionFor, selectionPayload, selected, inlineAt, pendingComments, sessionTarget, fileStats, pathParts, commentStatus, commentLocation, reviewSummary, sendHint, unreadItems, visibleComments, layoutSidebar, reviewSidebarTransition, fullPreferences, snapshotFailure, needsFreshSnapshot, savedBaseChoice } from "./review.js";
 import { renderFull } from "./full.js";
 import { highlightDiff } from "./syntax.js";
@@ -11,7 +13,7 @@ import { UpdateController } from "./updates.js";
 import { escapeText, copiedDiff, copiedSelection, contextGaps } from "./review.js";
 import { reviewOrderKey, orderedReviewFiles, existingReviewTab, deliveryBlocker, reviewTargetReady, reviewedDraft, agentWaiting, reviewTotals, editorLine, editorArgs, rangeText, entryText, dragSide } from "./review.js";
 import { splitRows } from "./review.js";
-import { COMMENT_CONTEXT, LEAVE_COMMENT, EMPTY_KEYS, VIM_HELP, readKey, cursorTargets, findCursor, changeStarts, moveIndex, rangeSelection, holdsCursor } from "./vim.js";
+import { typedEscape, EMPTY_KEYS, VIM_HELP, readKey, cursorTargets, findCursor, changeStarts, moveIndex, rangeSelection, holdsCursor } from "./vim.js";
 
 function location() {
   const fixed = props();
@@ -56,7 +58,13 @@ export default class Annotator extends View {
     this.view = ["comments", "github"].includes(props()?.view) ? props().view : "diff"; this.filesOpen = this.full ? preferences.filesOpen : true;
     this.editor = TextareaState.new({ placeholder: "What should change? Ask a question or leave feedback…", rows: 3 });
     this.draft = new DraftLifecycle(this.editor);
-    this.editor.on("change", (_e, cx) => { this.publishUpdateState(); cx.notify(); });
+    this.editorText = "";
+    this.editor.on("change", (_e, cx) => {
+      const value = this.editor.value(), kept = this.editorFocused ? typedEscape(this.editorText, value) : null;
+      this.editorText = kept ?? value;
+      if (kept != null) { this.editor.set_value(kept); this.leaveComment(cx); return; }
+      this.publishUpdateState(); cx.notify();
+    });
     this.editor.on("focus", () => { this.editorFocused = true; });
     this.editor.on("blur", () => { this.editorFocused = false; });
     this.editor.on("submit", (event, cx) => {
@@ -66,18 +74,18 @@ export default class Annotator extends View {
     this.blankReviewNote = this.createReviewNote();
     this.ensureReviewNote(contextKey());
     this.handle = cx.focus_handle();
-    // The textarea consumes Escape through its own key binding, so a parent
-    // key_down never sees it. A binding in the comment box's context, also
-    // matched at the textarea's own depth, runs first instead.
-    try {
-      cx.bind_keys?.([
-        { keystroke: "escape", action: LEAVE_COMMENT, context: COMMENT_CONTEXT },
-        { keystroke: "escape", action: LEAVE_COMMENT, context: `${COMMENT_CONTEXT} Input` },
-      ]);
-    } catch { cx.bind_keys?.([{ keystroke: "escape", action: LEAVE_COMMENT, context: COMMENT_CONTEXT }]); }
+    this.nvimScroll = ScrollHandle.new();
+    this.nvim = new NvimBox({ exec, hc, readFile: readTextFile, socket: `/tmp/annotator-nvim-${home().split("/").pop()}.sock`,
+      bridge: `${appHome()}/mods/annotator/nvim-bridge.lua` });
     this.diffScroll = ScrollHandle.new();
     this.sidebarScroll = ScrollHandle.new();
     this.vimKeys = EMPTY_KEYS; this.cursor = null; this.visual = null; this.vimSide = "new";
+    // A new review tab opens with the cursor on the first change; claimKeyboard gives it the keys.
+    if (this.full) {
+      this.cursorAuto = true;
+      // Hidden tabs don't render, so notice leaving here; coming back then claims the keyboard again.
+      cx.timer.every(250, () => { if (this.claimedTab && focused()?.tab !== this.claimedTab) this.claimedPane = null; });
+    }
     this.findOpen = false; this.findIndex = 0; this.findMatches = [];
     this.findEditor = InputState.new({ placeholder: "Find in diff" });
     this.findEditor.on("change", (_e, cx) => { this.findIndex = 0; this.findReveal = true; cx.notify(); });
@@ -493,9 +501,16 @@ export default class Annotator extends View {
     if (!file?.loaded || file.truncated) { this.notice = "Load a complete preview before asking about this diff."; cx.notify(); return; }
     this.reviewSend = null;
     const editor = TextareaState.new({ placeholder: "What do you want to ask about this code?", rows: 3 });
-    editor.on("change", (_event, cx) => { this.publishUpdateState(); cx.notify(); });
+    const key = this.navigationKey();
+    let text = "";
+    editor.on("change", (_event, cx) => {
+      const value = editor.value(), kept = typedEscape(text, value);
+      text = kept ?? value;
+      if (kept != null) { editor.set_value(kept); this.leaveQuestion(key, cx); return; }
+      this.publishUpdateState(); cx.notify();
+    });
     editor.on("submit", (event, cx) => { if (event.secondary && !event.shift) this.sendQuestion(cx); });
-    this.questions.set(this.navigationKey(), { id: this.githubReplyId(), path: file.path, context,
+    this.questions.set(key, { id: this.githubReplyId(), path: file.path, context,
       revision: this.data.snapshot.revision, scope: this.data.snapshot.scope,
       view: this.data.snapshot.view ?? { file: file.path, context: this.contextLines }, editor, status: null });
     this.publishUpdateState();
@@ -579,6 +594,7 @@ export default class Annotator extends View {
   }
 
   handleKey(event, cx) {
+    if (this.nvim.active && this.handle.is_focused()) { this.nvimBoxKey(event, cx); cx.stop_propagation(); return; }
     if (event.key === "escape" && this.editorFocused) { this.leaveComment(cx); cx.stop_propagation(); return; }
     // Vim keys only when the diff itself has the keyboard, never while typing.
     if (this.handle.is_focused() && this.vimKey(event, cx)) { cx.stop_propagation(); return; }
@@ -611,20 +627,46 @@ export default class Annotator extends View {
     }
   }
 
+  /**
+   * Herdr's pane.focus marks a mod pane focused without giving the mod's own
+   * element the keyboard, so vim keys needed a click. A review tab renders only
+   * while shown, so when Herdr's focused pane is a mod (not a terminal) and
+   * changes, this copy is that pane: take the keyboard. Focus cannot move during
+   * render, so the task waits one tick first.
+   */
+  claimKeyboard(cx) {
+    const now = focused(), pane = now?.pane && !now.terminal ? now.pane : null;
+    if (pane && pane !== this.claimedPane) {
+      this.claimedTab = now.tab;
+      cx.spawn(async cx => { await cx.sleep(0); this.focusReview(); cx.notify(); });
+    }
+    this.claimedPane = pane;
+  }
+
   focusReview() {
     this.editorFocused = false; this.reviewNoteFocused = false;
     this.handle.focus();
   }
 
-  /** Esc in the comment box: an empty box is cancelled, typed text stays as a draft. */
+  /** jk in the ask box (or Esc in the diff): an empty question closes, typed text stays open. */
+  leaveQuestion(key, cx) {
+    const draft = this.questions.get(key);
+    if (draft && !draft.editor.value().trim() && draft.status !== "uncertain") this.questions.delete(key);
+    this.focusReview(); cx.notify();
+  }
+
+  /** Why c/C cannot start a comment right now, or null. */
+  commentBlocker() {
+    if (this.questionDraft) return "A question is open: send it, or empty it and press Esc (or click Close) first.";
+    if (this.editDraft) return "A comment is being edited: save or cancel that first.";
+    if (this.busy) return "Still loading: try again in a moment.";
+    return null;
+  }
+
+  /** Leaving the comment box: an empty box is cancelled, typed text stays as a draft. */
   leaveComment(cx) {
     if (!this.editor.value().trim() && !this.editDraft && !this.questionDraft) this.cancelDraft(cx);
     this.visual = null; this.focusReview(); cx.notify();
-  }
-
-  /** Wraps a comment textarea so Escape leaves it (see the binding in init). */
-  commentBox(element) {
-    return div().w_full().key_context(COMMENT_CONTEXT).on_action(LEAVE_COMMENT, (_event, cx) => this.leaveComment(cx)).child(element);
   }
 
   vimKey(event, cx) {
@@ -641,7 +683,9 @@ export default class Annotator extends View {
       case "side": this.vimSideSwitch(action.side, cx); return true;
       case "visual": this.toggleVisual(cx); return true;
       case "comment": this.vimComment(cx); return true;
-      case "file-comment": this.visual = null; this.fileNote(cx); return true;
+      case "file-comment":
+        if (this.commentBlocker()) { this.notice = this.commentBlocker(); cx.notify(); return true; }
+        this.visual = null; this.fileNote(cx); this.openCommentBox(cx); return true;
       case "ask": {
         const selection = this.vimSelection();
         if (!selection || this.hasDraft()) return true;
@@ -659,8 +703,9 @@ export default class Annotator extends View {
       case "submit": if (this.reviewSendOpen) this.confirmReviewSend(cx); else this.beginReviewSend(cx); return true;
       case "help": this.notice = VIM_HELP; cx.notify(); return true;
       case "escape":
-        if (!this.visual) return false;
-        this.exitVisual(cx); return true;
+        if (this.visual) { this.exitVisual(cx); return true; }
+        if (this.questionDraft && !this.questionDraft.editor.value().trim()) { this.leaveQuestion(this.navigationKey(), cx); return true; }
+        return false;
       default: return false;
     }
   }
@@ -744,12 +789,97 @@ export default class Annotator extends View {
   // Mirrors selectLine: anchors the draft to the line or visual range and
   // moves the keyboard into the comment box ("insert mode").
   vimComment(cx) {
-    const selection = this.vimSelection();
-    if (!selection || this.busy || this.editDraft || this.questionDraft) return;
+    const selection = this.vimSelection(), blocked = this.commentBlocker();
+    if (blocked) { this.notice = blocked; cx.notify(); return; }
+    if (!selection) { this.notice = "Move to a line first: j/k, ]c, or click one."; cx.notify(); return; }
     this.visual = null; this.dragCopyText = null; this.reviewSend = null;
     this.draft.anchor(selection, this.data?.snapshot.revision);
     this.activeComment = null; this.activeCommentIds = null; this.exportText = null; this.notice = null;
-    this.editor.focus(); cx.notify();
+    this.openCommentBox(cx);
+  }
+
+  /**
+   * Opens the comment box for the anchored draft. Locally the box is driven by
+   * the shared headless nvim (the person's own config); remote checkouts,
+   * checks and nvim failures use the native textarea.
+   */
+  openCommentBox(cx, insert = true) {
+    const scope = this.data?.snapshot.scope;
+    if (checking() || !scope || scope.machine) { this.editor.focus(); cx.notify(); return; }
+    const nvim = this.nvim;
+    nvim.active = true; nvim.state = null; nvim.events.length = 0;
+    this.focusReview(); cx.notify();
+    cx.spawn(async cx => {
+      try {
+        await nvim.ensureServer(cx);
+        await nvim.load(this.editor.value());
+        if (insert) { await nvim.send("A"); await nvim.awaitChange(cx); }
+        this.syncFromNvim(cx);
+      } catch (error) { this.nvimActions().fail(error, cx); }
+    });
+  }
+
+  syncFromNvim(cx) {
+    const lines = this.nvim.state?.lines;
+    if (lines) { const text = lines.join("\n"); this.editorText = text; this.editor.set_value(text); this.publishUpdateState(); }
+    this.nvimReveal = true; cx.notify();
+  }
+
+  closeCommentBox() { this.nvim.active = false; this.nvim.events.length = 0; this.focusReview(); }
+
+  /** What the nvim box's intercepted keys do in the review. */
+  nvimActions() {
+    return this.nvimActionSet ??= {
+      update: cx => this.syncFromNvim(cx),
+      save: cx => { this.syncFromNvim(cx); this.closeCommentBox(); this.saveComment(cx); cx.notify(); },
+      leave: cx => { this.syncFromNvim(cx); this.closeCommentBox(); this.leaveComment(cx); },
+      discard: cx => { this.closeCommentBox(); this.cancelDraft(cx); },
+      fail: (error, cx) => {
+        this.nvim.active = false;
+        this.notice = `nvim unavailable, using the plain comment box: ${String(error).slice(0, 200)}`;
+        this.editor.focus(); cx.notify();
+      },
+    };
+  }
+
+  /** Keys while the nvim box has the keyboard. Cmd chords stay with the mod. */
+  nvimBoxKey(event, cx) {
+    if (["cmd-enter", "cmd-return", "ctrl-enter", "ctrl-return"].includes(event.keystroke)) { this.nvimActions().save(cx); return; }
+    if (event.keystroke === "cmd-v") {
+      const text = cx.read_from_clipboard?.();
+      if (text) this.nvim.push({ key: "paste", key_char: text, modifiers: {} }, cx, this.nvimActions());
+      return;
+    }
+    if (event.modifiers?.platform) return;
+    this.nvim.push(event, cx, this.nvimActions());
+  }
+
+  /**
+   * The comment text area: nvim-driven while the box is active, else the native
+   * textarea (a press on it opens the nvim box when nvim is available).
+   */
+  commentInput(height) {
+    if (!this.nvim.active) return div().w_full().on_mouse_down("left", (_event, cx) => {
+      if (!checking() && !this.data?.snapshot.scope.machine && !this.editDraft && !this.questionDraft) this.openCommentBox(cx, false);
+    }).child(Textarea.new(this.editor).h(height).w_full().text_size(13));
+    const t = theme(), state = this.nvim.state;
+    const lines = state?.lines ?? this.editor.value().split("\n");
+    const piece = run => {
+      if (run.kind === "bar") return div().w(2).h(17).flex_none().bg(t.accent);
+      return div().flex_none().child(run.text.replace(/\t/g, "    "))
+        .when(run.kind === "cursor", el => el.bg(t.foreground).text_color(t.background))
+        .when(run.kind === "visual", el => el.bg(t.selected));
+    };
+    // Words wrap like the native box; a run is split at spaces so long lines fold.
+    const pieces = runs => runs.flatMap(run => run.kind === "plain" || run.kind === "visual"
+      ? run.text.split(/(?<= )/).map(text => piece({ ...run, text })) : [piece(run)]);
+    const view = v_flex().id("nvim-comment").w_full().h(height).text_size(13)
+      .child(v_flex().id("nvim-comment-lines").flex_1().min_h(0).overflow_y_scroll().track_scroll(this.nvimScroll)
+        .children(lines.map((line, row) => h_flex().id(`nvim-line-${row}`).w_full().min_h(18).flex_wrap().items_center()
+          .children(pieces(lineRuns(line, row, state))))))
+      .child(div().flex_none().h(15).text_size(10.5).text_color(state?.cmdline != null ? t.foreground : t.dim).truncate().child(modeLabel(state)));
+    if (this.nvimReveal && state) { this.nvimScroll.scroll_to_item(state.row); this.nvimReveal = false; }
+    return view;
   }
 
   reviewShortcut(cx, commentComposer = this.editorFocused) {
@@ -1360,6 +1490,7 @@ export default class Annotator extends View {
   // collapsed, so one Full context click never inflates every later diff.
   selectFile(path, cx, context = 3) {
     if (this.busy) return;
+    if (this.nvim.active) this.closeCommentBox();
     this.reviewSend = null;
     this.focusReview();
     if (path === this.open) {
@@ -1403,7 +1534,7 @@ export default class Annotator extends View {
     this.cursor = { path: this.open, side, line: row[side], index: -1 }; this.visual = null;
     if (this.full && this.diffStyle === "split") this.vimSide = side;
     this.activeComment = null; this.activeCommentIds = null; this.composerOpen = true;
-    this.exportText = null; this.notice = null; this.editor.focus(); cx.notify();
+    this.exportText = null; this.notice = null; this.openCommentBox(cx);
   }
 
   commentCard(comment, t, showFile = false) {
@@ -1551,7 +1682,7 @@ export default class Annotator extends View {
     if (!current) return div().p(12).text_color(t.dim).child("Finishing the previous worktree's request…");
     if (this.snapshotError?.kind === "not-repository") return this.emptyCheckout(t);
     this.placePendingCursor(); this.cursorChild = null;
-    if (this.full) return renderFull(this, cx);
+    if (this.full) { this.claimKeyboard(cx); return renderFull(this, cx); }
     const data = current ? this.data : null;
     const files = this.reviewFiles(data?.snapshot);
     const allComments = data?.comments ?? [];
@@ -1666,7 +1797,7 @@ export default class Annotator extends View {
           .when(Boolean(selection) || this.needsSelection, el => el.child(this.button("file-note", "Whole file", cx => this.fileNote(cx), Boolean(file)))))
         .when(!selection, el => el.child(div().text_size(10.5).text_color(t.dim).child(file ? source.name : "Select a changed file first")))
         .child(div().rounded(5).bg(t.background).border_1().border_color(t.border).p(6)
-          .child(this.commentBox(Textarea.new(this.editor).h(65).w_full().text_size(13))))
+          .child(this.commentInput(65)))
         .child(h_flex().gap(5).items_center()
           .child(div().flex_1())
           .when(hasDraft || Boolean(selection), el => el.child(this.button("cancel-note", "Cancel", cx => {

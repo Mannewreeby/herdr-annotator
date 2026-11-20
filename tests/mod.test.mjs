@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import * as review from "../mods/annotator/review.js";
 import * as syntax from "../mods/annotator/syntax.js";
 import * as vim from "../mods/annotator/vim.js";
+import * as nvimBox from "../mods/annotator/nvim-box.js";
 import { DraftLifecycle } from "../mods/annotator/draft.js";
 import { GithubRefresh } from "../mods/annotator/github-refresh.js";
 import { UpdateController } from "../mods/annotator/updates.js";
@@ -52,13 +53,13 @@ function harness() {
   const cx = { notify() {}, stop_propagation() {}, write_to_clipboard: text => { state.clipboard = text; }, focus_handle: () => ({
     focus() { state.focusedInput?.emit("blur", {}); state.focusedInput = null; state.reviewFocused = true; },
     is_focused: () => Boolean(state.reviewFocused),
-  }), timer: { every() {}, after(_ms, fn) {
+  }), timer: { every(_ms, fn) { (state.repeating ??= []).push(fn); }, after(_ms, fn) {
     const timer = { cancelled: false, fire: () => { if (!timer.cancelled) fn(cx); }, cancel() { timer.cancelled = true; } };
     (state.timers ??= []).push(timer); return timer;
-  } }, spawn(fn) { jobs.push(Promise.resolve().then(() => fn(cx))); } };
+  } }, spawn(fn) { jobs.push(Promise.resolve().then(() => fn(cx))); }, sleep: async () => {} };
   const storage = new Map();
   const context = {
-    ...review, ...syntax, ...vim, DraftLifecycle, GithubRefresh, UpdateController,
+    ...review, ...syntax, ...vim, ...nvimBox, DraftLifecycle, GithubRefresh, UpdateController,
     sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
     View: class {}, div: node, h_flex: node, v_flex: node, v_resizable: node, h_resizable: node,
     resizable_panel: () => { state.panelCalls = (state.panelCalls ?? 0) + 1; return node(); },
@@ -85,6 +86,10 @@ function harness() {
       state.diffList = { id, count, key, render, scroll }; return result;
     },
     run: (name, args) => { state.commands.push({ name, args }); },
+    // The nvim comment box is off (checking) unless a test supplies state.nvim.
+    checking: () => !state.nvim,
+    hc: async args => state.nvim.hc(args),
+    readTextFile: async () => state.nvim?.file ?? null,
     TextareaState: { new: input }, Textarea: { new: node },
     InputState: { new: input }, Input: { new: node },
     TextView: { html: (id, html) => { state.textViews ??= []; state.textViews.push({ id, html }); return node().id(id); } },
@@ -95,6 +100,8 @@ function harness() {
     panes: () => state.reviewPanes ?? [],
     home: () => "/home/me", exec: async (_helper, args) => {
       if (state.exec && ["code", "hc"].includes(_helper)) return state.exec(_helper, args);
+      if (_helper === "rm") return { code: 0, stdout: "", stderr: "" };
+      if (_helper === "nvim") return state.nvim.exec(args);
       if (_helper === "python3") return { code: 0, stdout: JSON.stringify({ ok: true, data: { current: "0.2.0", latest: null, checked_at: Date.now() / 1000, job: {} } }) };
       if (_helper === "herdr-app") {
         state.commands.push({ name: args[1], args: JSON.parse(args[2]) });
@@ -2051,7 +2058,7 @@ test("vim keys walk the diff, select a visual range and comment on it without th
   assert.equal(h.mod.open, "src/order.rs", "]q opens the next file");
 });
 
-test("Escape cancels an empty comment box and keeps a typed one as a draft", async () => {
+test("leaving the comment box cancels it when empty and keeps typed text as a draft", async () => {
   const h = harness(); h.mod.init({}, h.cx); await h.drain();
   h.mod.data.snapshot.files[0] = { path: "src/fee.rs", status: " M", loaded: true, truncated: false, rows: [
     { kind: "context", old: 1, new: 1, text: "fn fee(base: u64) -> u64 {" },
@@ -2069,4 +2076,146 @@ test("Escape cancels an empty comment box and keeps a typed one as a draft", asy
   h.mod.leaveComment(h.cx);
   assert.equal(h.mod.editor.value(), "Use a named percentage", "typed text survives Escape");
   assert.deepEqual(review.selectionPayload(h.mod.selection), { side: "new", start: 2, end: 2 });
+});
+
+test("jk typed in the comment box leaves it like an insert-mode escape", async () => {
+  const h = harness(); h.mod.init({}, h.cx); await h.drain();
+  h.mod.open = h.mod.data.snapshot.files[0].path; h.mod.focusReview();
+  for (const k of "]cc") h.mod.handleKey({ key: k, keystroke: k, key_char: k, modifiers: {} }, h.cx);
+  for (const text of ["Nam", "Name", "Name j", "Name jk"]) { h.mod.editor.set_value(text); h.mod.editor.emit("change", {}); }
+  assert.equal(h.mod.editor.value(), "Name ");
+  assert.equal(h.state.reviewFocused, true);
+});
+
+test("K opens a question; leaving it empty closes it so c can comment again", async () => {
+  const h = harness(); h.mod.init({}, h.cx); await h.drain();
+  h.mod.open = h.mod.data.snapshot.files[0].path; h.mod.focusReview();
+  const type = keys => { for (const k of keys) h.mod.handleKey({ key: k.toLowerCase(), keystroke: k, key_char: k, modifiers: {} }, h.cx); };
+
+  type("]cK");
+  const question = h.mod.questionDraft;
+  assert.ok(question, "K asks about the cursor line");
+  h.mod.focusReview(); type("c");
+  assert.match(h.mod.notice, /question is open/, "back in the diff, c explains why it cannot comment yet");
+  question.editor.focus();
+
+  for (const text of ["j", "jk"]) { question.editor.set_value(text); question.editor.emit("change", {}); }
+  assert.equal(h.mod.questionDraft, undefined, "jk in an empty question closes it");
+  assert.equal(h.state.reviewFocused, true);
+
+  type("c");
+  assert.equal(h.state.focusedInput, h.mod.editor, "c comments once the question is gone");
+});
+
+// A tiny stand-in for the headless nvim: enough modes to drive the comment box.
+function fakeNvim() {
+  const nvim = { lines: [""], mode: "n", cmdline: null, running: false, calls: [], seq: 0, file: null };
+  const state = () => JSON.stringify({ seq: ++nvim.seq, mode: nvim.mode, timeout: 300, lines: nvim.lines,
+    row: nvim.lines.length - 1, col: nvim.lines.at(-1).length, ...(nvim.cmdline != null ? { cmdline: nvim.cmdline } : {}) });
+  const keys = text => text.match(/<[^>]+>|./g) ?? [];
+  nvim.hc = async args => { nvim.calls.push(["hc", args[0]]); if (args[0] === "run") nvim.running = true; return { code: 0, stdout: "{}" }; };
+  nvim.exec = async args => {
+    const [, , kind, value] = args;
+    if (!nvim.running) return { code: 1, stdout: "", stderr: "connection refused" };
+    if (kind === "--remote-expr") {
+      if (value === "1") return { code: 0, stdout: "1" };
+      const load = /^v:lua\.AnnotatorBridge\.load\('(.*)'\)$/s.exec(value);
+      if (load) { nvim.lines = load[1].replace(/''/g, "'").split("\n"); nvim.mode = "n"; }
+      nvim.file = state();
+      return { code: 0, stdout: nvim.file };
+    }
+    for (const key of keys(value)) {
+      if (nvim.cmdline != null) { if (key === "<C-c>" || key === "<Esc>") { nvim.cmdline = null; nvim.mode = "n"; } else nvim.cmdline += key; }
+      else if (nvim.mode === "i") { if (key === "<Esc>") nvim.mode = "n"; else nvim.lines[nvim.lines.length - 1] += key === "<lt>" ? "<" : key; }
+      else if (key === "A") nvim.mode = "i";
+      else if (key === ":") { nvim.mode = "c"; nvim.cmdline = ":"; }
+    }
+    nvim.file = state();
+    return { code: 0, stdout: "" };
+  };
+  return nvim;
+}
+
+test("the inline comment box is edited by nvim: type, Esc, :w saves the comment", async () => {
+  const h = harness(); h.state.nvim = fakeNvim();
+  h.mod.init({}, h.cx); await h.drain();
+  h.mod.open = h.mod.data.snapshot.files[0].path; h.mod.focusReview();
+  const press = (key, key_char = key) => h.mod.handleKey({ key, keystroke: key, key_char, modifiers: {} }, h.cx);
+
+  for (const k of "]cc") press(k);
+  await h.drain();
+  assert.equal(h.mod.nvim.active, true, "c opens the nvim box inline");
+  assert.equal(h.mod.nvim.state.mode, "i", "a new comment starts in insert mode");
+  assert.equal(h.state.reviewFocused, true, "the box takes keys through the review, not a native textarea");
+
+  for (const k of "Use <b> here") press(k === " " ? "space" : k, k);
+  press("escape", undefined); await h.drain();
+  assert.equal(h.mod.editor.value(), "Use <b> here", "the draft mirrors nvim's buffer, < included");
+  assert.equal(h.mod.nvim.state.mode, "n");
+
+  press(":"); press("w"); await h.drain();
+  press("enter", undefined); await h.drain();
+  assert.equal(h.mod.nvim.active, false, ":w leaves the box");
+  const added = h.requests.filter(request => request.op === "add");
+  assert.equal(added.length, 1);
+  assert.equal(added[0].body, "Use <b> here");
+});
+
+test("Esc in nvim normal mode returns to the diff and keeps the draft; :q! discards", async () => {
+  const h = harness(); h.state.nvim = fakeNvim();
+  h.mod.init({}, h.cx); await h.drain();
+  h.mod.open = h.mod.data.snapshot.files[0].path; h.mod.focusReview();
+  const press = (key, key_char = key) => h.mod.handleKey({ key, keystroke: key, key_char, modifiers: {} }, h.cx);
+
+  for (const k of "]cc") press(k); await h.drain();
+  for (const k of "maybe") press(k); press("escape", undefined); await h.drain();
+  press("escape", undefined); await h.drain();
+  assert.equal(h.mod.nvim.active, false);
+  assert.equal(h.mod.editor.value(), "maybe", "the draft is kept");
+  press("j");
+  assert.equal(h.mod.nvim.active, false, "keys drive the diff again");
+
+  press("c"); await h.drain();
+  press("escape", undefined); await h.drain();
+  press(":"); press("q"); press("!"); await h.drain();
+  press("enter", undefined); await h.drain();
+  assert.equal(h.mod.nvim.active, false);
+  assert.equal(h.mod.editor.value(), "", ":q! discards the draft");
+  assert.equal(h.requests.some(request => request.op === "add"), false);
+});
+
+test("a full review tab takes the keyboard when Herdr focuses its pane, without a click", async () => {
+  const h = harness(); h.state.props = { presentation: "full" };
+  h.mod.init({}, h.cx); await h.drain();
+  h.state.reviewFocused = false;
+  // Herdr's pane.focus on the new review tab: a mod pane, so no terminal.
+  h.state.focus = { space: "space1", tab: "review-tab", pane: "review-pane", terminal: null };
+  h.mod.render(h.cx); await h.drain();
+  assert.equal(h.state.reviewFocused, true, "vim keys work right away");
+
+  // A click into the comment box moves focus there; re-rendering must not steal it back.
+  h.mod.editor.focus(); h.mod.render(h.cx); await h.drain();
+  assert.equal(h.state.focusedInput, h.mod.editor);
+
+  // Leaving for a terminal and coming back claims it again.
+  h.state.focus = { space: "space1", tab: "tab1", pane: "p7", terminal: "t7" }; h.mod.render(h.cx);
+  h.state.focus = { space: "space1", tab: "review-tab", pane: "review-pane", terminal: null };
+  h.mod.render(h.cx); await h.drain();
+  assert.equal(h.state.reviewFocused, true);
+});
+
+test("returning to a review tab from another tab gives it the keyboard again", async () => {
+  const h = harness(); h.state.props = { presentation: "full" };
+  h.mod.init({}, h.cx); await h.drain();
+  const review = { space: "space1", tab: "review-tab", pane: "review-pane", terminal: null };
+  h.state.focus = review; h.mod.render(h.cx); await h.drain();
+  assert.equal(h.state.reviewFocused, true);
+
+  // Cmd-2: another tab is shown; the hidden review tab stops rendering, its timers keep running.
+  h.state.reviewFocused = false;
+  h.state.focus = { space: "space1", tab: "tab1", pane: "p7", terminal: "t7" };
+  for (const tick of h.state.repeating) tick(h.cx);
+
+  h.state.focus = review; h.mod.render(h.cx); await h.drain();
+  assert.equal(h.state.reviewFocused, true, "vim keys work again without a click");
 });

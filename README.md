@@ -188,7 +188,6 @@ typing in a comment or search box.
 | `h` / `l` | Old / new side in split view |
 | `V` or `v` | Visual line selection; `Esc` cancels |
 | `c` `i` `a` `o` `Enter` | Comment on the line or selection |
-| `Esc` in the comment box | Back to the diff, keeping the draft |
 | `C` | Whole-file comment |
 | `K` | Ask the agent about the line or selection |
 | `/` then `n` / `N` | Find in the full review, next / previous match |
@@ -197,6 +196,24 @@ typing in a comment or search box.
 | `?` | Show this list |
 
 On layouts that type `[` and `]` with Option, the brackets still work.
+
+The comment box stays in the panel and keeps its look, but a hidden headless
+`nvim` with your own config does the editing: your mappings (`jk`), motions,
+operators, text objects, visual mode, registers and system clipboard, undo,
+and ex commands like `:s/a/b/`. In the box:
+
+| Keys | Action |
+| --- | --- |
+| `Esc` (or your `jk`) | Normal mode |
+| `Esc` in normal mode | Back to the diff, keeping the draft |
+| `:w` `:wq` `:x`, `⌘Enter` | Save the comment |
+| `:q` | Back to the diff, keeping the draft |
+| `:q!` | Discard the draft |
+
+One nvim (`hc` terminal `annotator-nvim`) serves every Annotator view and starts
+with the first comment; `hc kill annotator-nvim` picks up config changes on the
+next comment. Remote checkouts use the plain comment box, where a typed `jk`
+returns to the diff.
 
 ## Commands and integrations
 

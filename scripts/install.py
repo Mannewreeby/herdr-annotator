@@ -23,7 +23,7 @@ binary = home / ".local/bin/herdr-annotator"
 receipt = home / ".local/share/herdr-annotator/install.json"
 updater = receipt.parent / "update.py"
 installed = json.loads(receipt.read_text()) if receipt.exists() else {}
-files = ["mod.json", "review.js", "main.js", "full.js", "syntax.js", "draft.js", "github-refresh.js", "vim.js"]
+files = ["mod.json", "review.js", "main.js", "full.js", "syntax.js", "draft.js", "github-refresh.js", "vim.js", "nvim-box.js", "nvim-bridge.lua"]
 files.append("updates.js")
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()

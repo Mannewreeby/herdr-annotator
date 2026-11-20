@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { EMPTY_KEYS, readKey, cursorTargets, findCursor, changeStarts, moveIndex, rangeSelection, holdsCursor } from "../mods/annotator/vim.js";
+import { typedEscape, EMPTY_KEYS, readKey, cursorTargets, findCursor, changeStarts, moveIndex, rangeSelection, holdsCursor } from "../mods/annotator/vim.js";
 import { splitRows } from "../mods/annotator/review.js";
 
 // A two-hunk diff of src/pricing.rs: a one-line rewrite, then an added block.
@@ -98,4 +98,10 @@ test("split view uses the preferred column and falls back where it is empty", ()
   assert.ok(holdsCursor(pairs[change], { side: "old", line: 11 }, true));
   assert.ok(!holdsCursor(pairs[change], { side: "new", line: 12 }, true));
   assert.ok(holdsCursor(rows[2], { side: "old", line: 11 }, false));
+});
+
+test("jk at the end of the comment box text leaves it; other text is untouched", () => {
+  assert.equal(typedEscape("Rename this j", "Rename this jk"), "Rename this ");
+  assert.equal(typedEscape("Rename this", "Rename thisk"), null);
+  assert.equal(typedEscape("check jk", "check jkk"), null, "only a freshly typed k after j counts");
 });

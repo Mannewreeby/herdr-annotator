@@ -241,7 +241,7 @@ export function renderFull(self, cx) {
         .child(div().flex_1().min_w(0).truncate().font_semibold().text_size(12).child(selection ? `${selection.side === "old" ? "Old" : "New"} L${selection.start}–${selection.end}` : `File comment · ${file?.path ?? ""}`))
         .child(self.button("full-file-note", "Whole file", cx => self.fileNote(cx), Boolean(file)))
         .child(self.button("full-cancel", "Cancel", cx => self.cancelDraft(cx))))
-      .child(self.commentBox(Textarea.new(self.editor).h(70).w_full().text_size(13)))
+      .child(self.commentInput(70))
       .child(h_flex().justify_end().items_center()
         .child(self.button("full-save", "+ Save comment", cx => self.saveComment(cx), self.canSaveComment(), "primary")))));
 
@@ -256,7 +256,7 @@ export function renderFull(self, cx) {
       .child(div().font_semibold().text_size(12).text_color(selection ? t.accent : t.foreground)
         .child(selection ? `${selection.side === "old" ? "Old" : "New"} L${selection.start}–${selection.end}` : "Comment on this file"))
       .child(self.selectableText("full-inspector-path", file?.path ?? "Select a file").truncate().text_size(11).text_color(t.dim))
-      .child(self.commentBox(Textarea.new(self.editor).h(110).w_full().text_size(13)))
+      .child(self.commentInput(110))
       .child(h_flex().gap(5)
         .child(self.button("full-file-note", "Whole file", cx => self.fileNote(cx), Boolean(file)))
         .child(self.button("full-cancel", "Cancel", cx => self.cancelDraft(cx), hasDraft || Boolean(selection))))

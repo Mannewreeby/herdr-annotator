@@ -3,13 +3,17 @@
 
 export const HALF_PAGE = 15;
 
-/** Key context around comment textareas, and the action Escape dispatches there. */
-export const COMMENT_CONTEXT = "AnnotatorComment";
-export const LEAVE_COMMENT = "annotator_leave_comment";
-
 export const VIM_HELP = "j/k move · gg/G top/bottom · Ctrl-d/u half page · ]c/[c change · ]q/[q file · "
-  + "h/l old/new side · V visual · c/i/Enter comment · Esc normal · C file comment · K ask · "
-  + "/ find, n/N · t split/unified · ZZ review & send";
+  + "h/l old/new side · V visual · c/i/Enter comment (nvim keys; :w saves, Esc twice back) · C file comment · K ask · "
+  + "/ find, n/N · t split/unified · ZZ review & send · jk leaves the comment box";
+
+/**
+ * The text before a just-typed "jk", or null. Mirrors an insert-mode `jk` escape
+ * for the native comment box, whose Escape never reaches the mod.
+ */
+export function typedEscape(previous, next) {
+  return previous.endsWith("j") && next === `${previous}k` ? previous.slice(0, -1) : null;
+}
 
 function changed(item) {
   return item.kind === "add" || item.kind === "delete" || item.kind === "change";
