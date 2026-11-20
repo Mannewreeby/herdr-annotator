@@ -4,6 +4,7 @@ import vm from "node:vm";
 import { readFileSync } from "node:fs";
 import * as review from "../mods/annotator/review.js";
 import * as syntax from "../mods/annotator/syntax.js";
+import * as vim from "../mods/annotator/vim.js";
 import { DraftLifecycle } from "../mods/annotator/draft.js";
 import { GithubRefresh } from "../mods/annotator/github-refresh.js";
 import { UpdateController } from "../mods/annotator/updates.js";
@@ -57,7 +58,7 @@ function harness() {
   } }, spawn(fn) { jobs.push(Promise.resolve().then(() => fn(cx))); } };
   const storage = new Map();
   const context = {
-    ...review, ...syntax, DraftLifecycle, GithubRefresh, UpdateController,
+    ...review, ...syntax, ...vim, DraftLifecycle, GithubRefresh, UpdateController,
     sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
     View: class {}, div: node, h_flex: node, v_flex: node, v_resizable: node, h_resizable: node,
     resizable_panel: () => { state.panelCalls = (state.panelCalls ?? 0) + 1; return node(); },
@@ -2013,4 +2014,59 @@ test("keyboard review delivery accepts working but not blocked or unreported sou
     h.mod.reviewNote.editor.emit("submit", { secondary: true }); await h.drain();
     assert.equal(h.requests.some(request => request.op === "send"), status === "working", String(status));
   }
+});
+
+test("vim keys walk the diff, select a visual range and comment on it without the mouse", async () => {
+  const h = harness(); h.mod.init({}, h.cx); await h.drain();
+  h.mod.data.snapshot.files = [
+    { path: "src/fee.rs", status: " M", loaded: true, truncated: false, rows: [
+      { kind: "hunk", text: "@@ -1,3 +1,4 @@" },
+      { kind: "context", old: 1, new: 1, text: "fn fee(base: u64) -> u64 {" },
+      { kind: "delete", old: 2, new: null, text: "    base / 10" },
+      { kind: "add", old: null, new: 2, text: "    let percent = 10;" },
+      { kind: "add", old: null, new: 3, text: "    base * percent / 100" },
+      { kind: "context", old: 3, new: 4, text: "}" }] },
+    { path: "src/order.rs", status: " M", loaded: false, truncated: false, rows: [] }];
+  h.mod.open = "src/fee.rs"; h.mod.focusReview();
+  const type = keys => { for (const k of keys) h.mod.handleKey({ key: k.toLowerCase(), keystroke: k, key_char: k, modifiers: {} }, h.cx); };
+  const escape = () => h.mod.handleKey({ key: "escape", keystroke: "escape", modifiers: {} }, h.cx);
+
+  type("]c");
+  assert.deepEqual([h.mod.cursor.side, h.mod.cursor.line], ["old", 2], "]c lands on the first changed line");
+  type("jVj");
+  assert.deepEqual(review.selectionPayload(h.mod.selection), { side: "new", start: 2, end: 3 });
+  type("c");
+  assert.equal(h.state.focusedInput, h.mod.editor, "c moves the keyboard into the comment box");
+  assert.equal(h.mod.visual, null);
+  assert.deepEqual(review.selectionPayload(h.mod.selection), { side: "new", start: 2, end: 3 }, "the draft keeps the range");
+
+  h.mod.editor.set_value("Name the percentage as a constant");
+  escape();
+  assert.equal(h.state.reviewFocused, true, "Esc returns to normal mode");
+  assert.equal(h.mod.editor.value(), "Name the percentage as a constant", "and keeps the draft");
+
+  type("gg");
+  assert.equal(h.mod.cursor.line, 1);
+  type("]q");
+  assert.equal(h.mod.open, "src/order.rs", "]q opens the next file");
+});
+
+test("Escape cancels an empty comment box and keeps a typed one as a draft", async () => {
+  const h = harness(); h.mod.init({}, h.cx); await h.drain();
+  h.mod.data.snapshot.files[0] = { path: "src/fee.rs", status: " M", loaded: true, truncated: false, rows: [
+    { kind: "context", old: 1, new: 1, text: "fn fee(base: u64) -> u64 {" },
+    { kind: "add", old: null, new: 2, text: "    base * 10 / 100" }] };
+  h.mod.open = "src/fee.rs"; h.mod.focusReview();
+  const type = keys => { for (const k of keys) h.mod.handleKey({ key: k.toLowerCase(), keystroke: k, key_char: k, modifiers: {} }, h.cx); };
+
+  type("]cc");
+  assert.equal(h.state.focusedInput, h.mod.editor);
+  h.mod.leaveComment(h.cx);
+  assert.equal(h.mod.selection, null, "an empty box is cancelled");
+  assert.equal(h.state.reviewFocused, true);
+
+  type("c"); h.mod.editor.set_value("Use a named percentage");
+  h.mod.leaveComment(h.cx);
+  assert.equal(h.mod.editor.value(), "Use a named percentage", "typed text survives Escape");
+  assert.deepEqual(review.selectionPayload(h.mod.selection), { side: "new", start: 2, end: 2 });
 });

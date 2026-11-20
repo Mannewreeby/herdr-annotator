@@ -172,6 +172,32 @@ An unconfirmed post keeps its draft; check GitHub before explicitly retrying.
 **Send review submits with Enter**; check the chat
 before retrying uncertain delivery. Diff preview limits still apply.
 
+## Vim keys (this fork)
+
+Click the diff (or move to it with Herdr's pane navigation) and drive the review
+from the keyboard. Keys apply only while the diff itself has focus, never while
+typing in a comment or search box.
+
+| Keys | Action |
+| --- | --- |
+| `j` / `k`, `↓` / `↑` | Next / previous line (counts work: `5j`) |
+| `gg` / `G`, `42G` | First / last line, new line 42 |
+| `Ctrl-d` / `Ctrl-u` | Half page down / up |
+| `]c` / `[c` | Next / previous change |
+| `]q` / `[q` | Next / previous file |
+| `h` / `l` | Old / new side in split view |
+| `V` or `v` | Visual line selection; `Esc` cancels |
+| `c` `i` `a` `o` `Enter` | Comment on the line or selection |
+| `Esc` in the comment box | Back to the diff, keeping the draft |
+| `C` | Whole-file comment |
+| `K` | Ask the agent about the line or selection |
+| `/` then `n` / `N` | Find in the full review, next / previous match |
+| `t` | Toggle unified / split in the full review |
+| `ZZ` | Review & send (then `Enter` sends) |
+| `?` | Show this list |
+
+On layouts that type `[` and `]` with Option, the brackets still work.
+
 ## Commands and integrations
 
 Bind `annotator.submit`, `annotator.ask`, `annotator.scope`, `annotator.refresh`,

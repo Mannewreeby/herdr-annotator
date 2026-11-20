@@ -10,6 +10,8 @@ import { reviewLocation } from "./review.js";
 import { UpdateController } from "./updates.js";
 import { escapeText, copiedDiff, copiedSelection, contextGaps } from "./review.js";
 import { reviewOrderKey, orderedReviewFiles, existingReviewTab, deliveryBlocker, reviewTargetReady, reviewedDraft, agentWaiting, reviewTotals, editorLine, editorArgs, rangeText, entryText, dragSide } from "./review.js";
+import { splitRows } from "./review.js";
+import { COMMENT_CONTEXT, LEAVE_COMMENT, EMPTY_KEYS, VIM_HELP, readKey, cursorTargets, findCursor, changeStarts, moveIndex, rangeSelection, holdsCursor } from "./vim.js";
 
 function location() {
   const fixed = props();
@@ -64,11 +66,23 @@ export default class Annotator extends View {
     this.blankReviewNote = this.createReviewNote();
     this.ensureReviewNote(contextKey());
     this.handle = cx.focus_handle();
+    // The textarea consumes Escape through its own key binding, so a parent
+    // key_down never sees it. A binding in the comment box's context, also
+    // matched at the textarea's own depth, runs first instead.
+    try {
+      cx.bind_keys?.([
+        { keystroke: "escape", action: LEAVE_COMMENT, context: COMMENT_CONTEXT },
+        { keystroke: "escape", action: LEAVE_COMMENT, context: `${COMMENT_CONTEXT} Input` },
+      ]);
+    } catch { cx.bind_keys?.([{ keystroke: "escape", action: LEAVE_COMMENT, context: COMMENT_CONTEXT }]); }
     this.diffScroll = ScrollHandle.new();
+    this.sidebarScroll = ScrollHandle.new();
+    this.vimKeys = EMPTY_KEYS; this.cursor = null; this.visual = null; this.vimSide = "new";
     this.findOpen = false; this.findIndex = 0; this.findMatches = [];
     this.findEditor = InputState.new({ placeholder: "Find in diff" });
     this.findEditor.on("change", (_e, cx) => { this.findIndex = 0; this.findReveal = true; cx.notify(); });
-    this.findEditor.on("submit", (event, cx) => this.findStep(event.shift ? -1 : 1, cx));
+    // Like vim's search: Enter jumps and returns to the diff, where n/N continue.
+    this.findEditor.on("submit", (event, cx) => { this.findStep(event.shift ? -1 : 1, cx); this.focusReview(); });
     this.updates = new UpdateController({ exec, shared, setShared, storage: sessionStorage,
       script: `${home()}/.local/share/herdr-annotator/update.py`, appHome: appHome(),
       ready: cx => { if (!this.closed && !this.data && !this._busy) this.refresh(cx); } });
@@ -565,6 +579,9 @@ export default class Annotator extends View {
   }
 
   handleKey(event, cx) {
+    if (event.key === "escape" && this.editorFocused) { this.leaveComment(cx); cx.stop_propagation(); return; }
+    // Vim keys only when the diff itself has the keyboard, never while typing.
+    if (this.handle.is_focused() && this.vimKey(event, cx)) { cx.stop_propagation(); return; }
     const copy = ["cmd-c", "ctrl-c"].includes(event.keystroke) && !event.modifiers?.shift && !event.modifiers?.alt
       // The empty comment box takes focus after a line click; copying from it
       // would copy nothing, so the selected source lines win there too.
@@ -597,6 +614,142 @@ export default class Annotator extends View {
   focusReview() {
     this.editorFocused = false; this.reviewNoteFocused = false;
     this.handle.focus();
+  }
+
+  /** Esc in the comment box: an empty box is cancelled, typed text stays as a draft. */
+  leaveComment(cx) {
+    if (!this.editor.value().trim() && !this.editDraft && !this.questionDraft) this.cancelDraft(cx);
+    this.visual = null; this.focusReview(); cx.notify();
+  }
+
+  /** Wraps a comment textarea so Escape leaves it (see the binding in init). */
+  commentBox(element) {
+    return div().w_full().key_context(COMMENT_CONTEXT).on_action(LEAVE_COMMENT, (_event, cx) => this.leaveComment(cx)).child(element);
+  }
+
+  vimKey(event, cx) {
+    const { state, action, handled } = readKey(this.vimKeys, event);
+    this.vimKeys = state;
+    return (action ? this.vimAction(action, cx) : false) || handled;
+  }
+
+  /** Applies a parsed normal-mode action; true when it consumed the key. */
+  vimAction(action, cx) {
+    switch (action.type) {
+      case "move": this.moveCursor(action.motion, action.count, cx); return true;
+      case "file": this.vimFile(action.delta * action.count, cx); return true;
+      case "side": this.vimSideSwitch(action.side, cx); return true;
+      case "visual": this.toggleVisual(cx); return true;
+      case "comment": this.vimComment(cx); return true;
+      case "file-comment": this.visual = null; this.fileNote(cx); return true;
+      case "ask": {
+        const selection = this.vimSelection();
+        if (!selection || this.hasDraft()) return true;
+        this.visual = null;
+        this.beginQuestion({ kind: "selection", selection: selectionPayload(selection) }, cx); return true;
+      }
+      case "find": if (this.full && this.view === "diff") this.openFind(cx); return true;
+      case "find-step": if (this.findOpen) this.findStep(action.delta * action.count, cx); return true;
+      case "toggle-split": {
+        if (!this.full) return true;
+        this.diffStyle = this.diffStyle === "split" ? "unified" : "split";
+        this.rememberFull({ diffStyle: this.diffStyle }); setShared("annotator.diffStyle", this.diffStyle);
+        this.cursorReveal = true; cx.notify(); return true;
+      }
+      case "submit": if (this.reviewSendOpen) this.confirmReviewSend(cx); else this.beginReviewSend(cx); return true;
+      case "help": this.notice = VIM_HELP; cx.notify(); return true;
+      case "escape":
+        if (!this.visual) return false;
+        this.exitVisual(cx); return true;
+      default: return false;
+    }
+  }
+
+  vimRows() {
+    const file = this.data?.snapshot.files.find(f => f.path === this.open);
+    if (this.view !== "diff" || !file?.loaded || file.truncated) return null;
+    const split = this.full && this.diffStyle === "split";
+    return { file, split, rows: split ? splitRows(file.rows) : file.rows };
+  }
+
+  vimTargets(only = null) {
+    const view = this.vimRows();
+    return view ? cursorTargets(view.rows, { split: view.split, side: this.vimSide, only }) : [];
+  }
+
+  currentCursor() { return this.cursor?.path === this.open ? this.cursor : null; }
+
+  setCursor(target, cx) {
+    this.cursor = { path: this.open, side: target.side, line: target.line, index: target.index };
+    if (this.visual) this.selection = rangeSelection(this.visual, target);
+    this.cursorReveal = true; cx.notify();
+  }
+
+  moveCursor(motion, count, cx) {
+    const targets = this.vimTargets(this.visual?.side ?? null);
+    const to = moveIndex(targets, findCursor(targets, this.currentCursor()), motion, count);
+    if (to >= 0) this.setCursor(targets[to], cx);
+  }
+
+  /** After ]q/[q the new file loads asynchronously; the cursor lands on its first change once rows exist. */
+  placePendingCursor() {
+    if (!this.cursorAuto || this.currentCursor()) return;
+    const targets = this.vimTargets();
+    if (!targets.length) return;
+    const first = targets[changeStarts(targets)[0] ?? 0];
+    this.cursor = { path: this.open, side: first.side, line: first.line, index: first.index };
+    this.cursorAuto = false; this.cursorReveal = true;
+  }
+
+  vimFile(delta, cx) {
+    const files = this.reviewFiles(this.data?.snapshot).filter(f => !f.draftOnly);
+    if (!files.length || this.busy) return;
+    const at = files.findIndex(f => f.path === this.open);
+    const next = files[Math.max(0, Math.min(files.length - 1, at < 0 ? 0 : at + delta))];
+    if (next.path === this.open) return;
+    this.visual = null; this.cursor = null; this.cursorAuto = true;
+    this.selectFile(next.path, cx);
+  }
+
+  vimSideSwitch(side, cx) {
+    const view = this.vimRows();
+    if (!view?.split || this.visual) return;
+    const cursor = this.currentCursor(), before = this.vimTargets();
+    const row = cursor ? before[findCursor(before, cursor)]?.index : undefined;
+    this.vimSide = side;
+    const targets = this.vimTargets(), at = row == null ? -1 : targets.findIndex(t => t.index === row);
+    if (at >= 0) this.setCursor(targets[at], cx); else cx.notify();
+  }
+
+  vimSelection() {
+    if (this.visual) return this.selection;
+    const cursor = this.currentCursor();
+    return cursor ? { side: cursor.side, start: cursor.line, end: cursor.line, origin: cursor.line } : null;
+  }
+
+  toggleVisual(cx) {
+    if (this.visual) { this.exitVisual(cx); return; }
+    const cursor = this.currentCursor();
+    if (!cursor || this.busy || this.editDraft || this.questionDraft) return;
+    this.visual = { side: cursor.side, line: cursor.line };
+    this.selection = rangeSelection(this.visual, cursor); cx.notify();
+  }
+
+  exitVisual(cx) {
+    this.visual = null;
+    if (!this.hasDraft()) this.selection = null;
+    cx.notify();
+  }
+
+  // Mirrors selectLine: anchors the draft to the line or visual range and
+  // moves the keyboard into the comment box ("insert mode").
+  vimComment(cx) {
+    const selection = this.vimSelection();
+    if (!selection || this.busy || this.editDraft || this.questionDraft) return;
+    this.visual = null; this.dragCopyText = null; this.reviewSend = null;
+    this.draft.anchor(selection, this.data?.snapshot.revision);
+    this.activeComment = null; this.activeCommentIds = null; this.exportText = null; this.notice = null;
+    this.editor.focus(); cx.notify();
   }
 
   reviewShortcut(cx, commentComposer = this.editorFocused) {
@@ -1246,6 +1399,9 @@ export default class Annotator extends View {
     this.dragCopyText = null;
     this.reviewSend = null;
     this.draft.anchor(selectionFor(this.selection, row, event?.modifiers?.shift), this.data?.snapshot.revision);
+    const side = row.new != null ? "new" : "old";
+    this.cursor = { path: this.open, side, line: row[side], index: -1 }; this.visual = null;
+    if (this.full && this.diffStyle === "split") this.vimSide = side;
     this.activeComment = null; this.activeCommentIds = null; this.composerOpen = true;
     this.exportText = null; this.notice = null; this.editor.focus(); cx.notify();
   }
@@ -1329,17 +1485,25 @@ export default class Annotator extends View {
     const expand = i => this.button(`inline-context-${i}`, gaps.get(i), cx => this.expandContext(Math.min(1000000, this.contextLines + 20), cx), !this.busy);
     const pageKey = JSON.stringify([this.data?.snapshot.revision, file.path]);
     if (this.codePageKey !== pageKey) { this.codePageKey = pageKey; this.codePage = 0; }
-    const pageSize = 500, pages = Math.ceil(file.rows.length / pageSize), start = this.codePage * pageSize;
+    const pageSize = 500, pages = Math.ceil(file.rows.length / pageSize);
+    const cursor = this.currentCursor();
+    const cursorRow = cursor ? file.rows.findIndex(row => holdsCursor(row, cursor, false)) : -1;
+    if (this.cursorReveal && cursorRow >= 0) this.codePage = Math.floor(cursorRow / pageSize);
+    const start = this.codePage * pageSize;
+    // Child position of the cursor row inside the scroll area, for scroll_to_item.
+    let position = 0; this.cursorChild = null;
     const result = file.rows.slice(start, start + pageSize).flatMap((row, offset) => {
       const i = start + offset;
       const active = selected(row, this.selection);
+      const here = i === cursorRow;
       const selectable = !file.truncated && (row.old != null || row.new != null);
       const code = h_flex().id(`diff-${i}`).w_full().min_h(25).py(3).flex_none().gap(5).pr(8).items_start()
         .font_family(settings().font ?? "JetBrains Mono").text_size(12)
-        .border_l(3).border_color(active ? t.accent : t.background)
+        .border_l(3).border_color(active || here ? t.accent : t.background)
         .when(row.kind === "hunk", el => el.bg(t.raised).text_color(t.dim))
         .when(row.kind === "add", el => el.bg(t.ansi2 + "16"))
         .when(row.kind === "delete", el => el.bg(t.ansi1 + "16"))
+        .when(here && !active, el => el.bg(t.accent + "22"))
         .when(active, el => el.bg(t.selected))
         .when(selectable, el => el.cursor_pointer().hover(s => s.bg(t.hover))
           .on_click((event, cx) => {
@@ -1359,9 +1523,13 @@ export default class Annotator extends View {
         .child(div().w(10).flex_none().text_color(row.kind === "add" ? t.ansi2 : row.kind === "delete" ? t.ansi1 : t.dim)
           .child(row.kind === "add" ? "+" : row.kind === "delete" ? "−" : ""))
         .child(this.codeText(row, null, t, this.syntaxCache?.tokens));
-      return [...(gaps.has(i) ? [expand(i)] : []), code, ...inline.filter(c => inlineAt(c, row)).map(c => this.commentCard(c, t))];
+      const items = [...(gaps.has(i) ? [expand(i)] : []), code, ...inline.filter(c => inlineAt(c, row)).map(c => this.commentCard(c, t))];
+      if (here) this.cursorChild = position + (gaps.has(i) ? 1 : 0);
+      position += items.length;
+      return items;
     });
     if (start + pageSize >= file.rows.length && gaps.has(file.rows.length)) result.push(expand(file.rows.length));
+    if (pages > 1 && this.cursorChild != null) this.cursorChild += 1;
     if (pages > 1) result.unshift(h_flex().gap(6).items_center()
       .child(this.button("code-previous", "Previous rows", cx => { this.codePage--; cx.notify(); }, this.codePage > 0))
       .child(div().child(`${this.codePage + 1} / ${pages}`))
@@ -1382,6 +1550,7 @@ export default class Annotator extends View {
     const current = contextKey() === this.context;
     if (!current) return div().p(12).text_color(t.dim).child("Finishing the previous worktree's request…");
     if (this.snapshotError?.kind === "not-repository") return this.emptyCheckout(t);
+    this.placePendingCursor(); this.cursorChild = null;
     if (this.full) return renderFull(this, cx);
     const data = current ? this.data : null;
     const files = this.reviewFiles(data?.snapshot);
@@ -1410,7 +1579,7 @@ export default class Annotator extends View {
     const chat = target?.program?.name ?? (target?.app === "opencode" ? "OpenCode" : target?.app) ?? "Agent";
     const batchSize = pending.length + this.threadQueue.size + (this.reviewNote.editor.value().trim() ? 1 : 0);
     const sendLabel = batchSize ? `Review & send… · ${batchSize}` : "Review & send…";
-    return v_flex().id("annotator-root").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13).track_focus(this.handle)
+    const root = v_flex().id("annotator-root").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((event, cx) => this.handleKey(event, cx))
       .child(v_flex().flex_none().bg(t.chrome).px(10).py(6)
         .child(h_flex().items_center().gap(7)
@@ -1469,7 +1638,7 @@ export default class Annotator extends View {
             .child(this.button("ask-file", "Ask about diff", cx => this.beginQuestion({ kind: "file" }, cx), !hasDraft && file?.loaded && !file?.truncated))
             .when(Boolean(selection), el => el.child(this.button("ask-selection", "Ask about selection", cx => this.beginQuestion({ kind: "selection", selection: selectionPayload(selection) }, cx), !hasDraft))))))
         .when(this.copyMenuOpen, el => el.child(this.copyMenu(file)))
-        .child(v_flex().id("review-diff").flex_1().min_h(0).overflow_y_scrollbar()
+        .child(v_flex().id("review-diff").flex_1().min_h(0).overflow_y_scrollbar().track_scroll(this.sidebarScroll)
           .on_mouse_down("left", event => { this.codePress = event.local_position; this.codeRelease = null; })
           .on_mouse_up("left", event => { this.codeRelease = event.local_position; })
           .children([
@@ -1497,7 +1666,7 @@ export default class Annotator extends View {
           .when(Boolean(selection) || this.needsSelection, el => el.child(this.button("file-note", "Whole file", cx => this.fileNote(cx), Boolean(file)))))
         .when(!selection, el => el.child(div().text_size(10.5).text_color(t.dim).child(file ? source.name : "Select a changed file first")))
         .child(div().rounded(5).bg(t.background).border_1().border_color(t.border).p(6)
-          .child(Textarea.new(this.editor).h(65).w_full().text_size(13)))
+          .child(this.commentBox(Textarea.new(this.editor).h(65).w_full().text_size(13))))
         .child(h_flex().gap(5).items_center()
           .child(div().flex_1())
           .when(hasDraft || Boolean(selection), el => el.child(this.button("cancel-note", "Cancel", cx => {
@@ -1520,5 +1689,10 @@ export default class Annotator extends View {
         .child(this.button("send-review", sendLabel, cx => this.beginReviewSend(cx), reviewTargetReady(target) && !reviewDrafts, "primary").w_full().h(29).tooltip(sendBlocked ?? "Add an optional general note, then send · ⌘Enter / Ctrl+Enter"))
         .when(Boolean(this.snapshotError || this.reviewNote.uncertain || (target && !reviewTargetReady(target))), el => el
           .child(div().text_size(10.5).text_color(t.ansi3).child(this.snapshotError ? "Refresh failed. Review actions paused." : deliveryBlocker(target, false, this.reviewNote.uncertain))))));
+    if (this.cursorReveal && this.view === "diff" && this.cursorChild != null) {
+      this.sidebarScroll.scroll_to_item(this.cursorChild + (file?.note ? 1 : 0));
+      this.cursorReveal = false;
+    }
+    return root;
   }
 }

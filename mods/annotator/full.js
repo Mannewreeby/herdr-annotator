@@ -1,6 +1,7 @@
 import { div, list } from "gpui-kit";
 import { v_flex, h_flex, h_resizable, resizable_panel, v_virtual_list, Scrollbar, Textarea, Input } from "gpui-base";
 import { theme, settings, setShared } from "herdr";
+import { holdsCursor, cursorTargets } from "./vim.js";
 import { splitRows, splitSelectionRow, selected, pendingComments, unreadItems, visibleComments, fileStats, diffReaderEntries, commentStatus, commentLocation, deliveryBlocker, reviewTargetReady, contextGaps, copiedSelection, reviewTotals, entryText, searchMatches } from "./review.js";
 
 function pageCards(self, id, items, render) {
@@ -16,15 +17,15 @@ function pageCards(self, id, items, render) {
 }
 
 // Pure row builders: deferred native list renderers cannot register handlers.
-function codeCell(row, side, selection, t, marks, self, highlights) {
+function codeCell(row, side, selection, t, marks, self, highlights, here = false) {
   if (!row) return div().flex_1().min_w(0).bg(t.raised);
   const active = selected(row, selection) && (!side || selection?.side === side);
   const color = row.kind === "add" ? t.ansi2 : row.kind === "delete" ? t.ansi1 : t.dim;
   const number = side ? row[side] : null;
   const count = marks.get(`${side ?? (row.new != null ? "new" : "old")}:${number ?? row.new ?? row.old}`) ?? 0;
   return h_flex().flex_1().min_w(0).min_h(26).py(3).pr(12).gap(9).items_start()
-    .bg(active ? t.selected : row.kind === "add" ? t.ansi2 + "18" : row.kind === "delete" ? t.ansi1 + "18" : t.background)
-    .border_l(2).border_color(active ? t.accent : t.border)
+    .bg(active ? t.selected : here ? t.accent + "22" : row.kind === "add" ? t.ansi2 + "18" : row.kind === "delete" ? t.ansi1 + "18" : t.background)
+    .border_l(2).border_color(active || here ? t.accent : t.border)
     .when(!side, el => el.child(div().w(44).flex_none().text_right().text_color(t.dim).child(row.old == null ? "" : String(row.old))))
     .child(div().w(44).flex_none().text_right().text_color(t.dim).child(side ? String(number ?? "") : String(row.new ?? "")))
     .child(div().w(10).flex_none().text_color(color).child(row.kind === "add" ? "+" : row.kind === "delete" ? "−" : ""))
@@ -32,14 +33,16 @@ function codeCell(row, side, selection, t, marks, self, highlights) {
     .when(count > 0, el => el.child(div().text_color(t.accent).text_size(11).child(`● ${count}`)));
 }
 
-function diffRow(row, split, selection, t, font, marks, self, highlights) {
+function diffRow(row, split, selection, t, font, marks, self, highlights, cursor) {
   if (row.kind === "hunk" || row.kind === "meta") {
     return div().w_full().min_h(29).px(14).py(5).bg(t.raised).text_color(t.muted)
       .font_family(font).text_size(11).child(row.text);
   }
   return h_flex().w_full().min_h(26).font_family(font).text_size(13).cursor_pointer()
-    .when(split, el => el.child(codeCell(row.old, "old", selection, t, marks, self, highlights)).child(codeCell(row.new, "new", selection, t, marks, self, highlights)))
-    .when(!split, el => el.child(codeCell(row, null, selection, t, marks, self, highlights)));
+    .when(split, el => el
+      .child(codeCell(row.old, "old", selection, t, marks, self, highlights, cursor?.side === "old" && holdsCursor(row, cursor, true)))
+      .child(codeCell(row.new, "new", selection, t, marks, self, highlights, cursor?.side === "new" && holdsCursor(row, cursor, true))))
+    .when(!split, el => el.child(codeCell(row, null, selection, t, marks, self, highlights, holdsCursor(row, cursor, false))));
 }
 
 function inlineNote(comment, active, t, self) {
@@ -94,9 +97,10 @@ export function renderFull(self, cx) {
     ? div().w_full().border_l(3).border_color(index === currentMatch ? t.accent : t.accent + "55")
       .when(index === currentMatch, el => el.bg(t.accent + "22")).child(renderRow(entry))
     : renderRow(entry);
+  const cursor = self.currentCursor();
   const renderRow = entry => {
     if (entry.gap) return div().w_full().min_h(30).px(14).py(6).bg(t.raised).text_color(t.accent).cursor_pointer().child(entry.gap);
-    if (entry.row) return diffRow(entry.row, split, selection, t, font, marks, self, highlights);
+    if (entry.row) return diffRow(entry.row, split, selection, t, font, marks, self, highlights, cursor);
     return entry.comments.length ? v_flex().children(entry.comments.map(comment => inlineNote(comment, comment.id === self.activeComment, t, self))) : div().h(0);
   };
   const itemClick = (key, cx) => {
@@ -158,7 +162,19 @@ export function renderFull(self, cx) {
     : list(listId, entries.length, index => entries[index].key, index => renderEntry(entries[index], index))
       .size_full().on_item_click(itemClick).on_item_secondary_click(itemSecondary);
   // Only the eager rows scroll from code; GPUI's lazy list ignores handles.
+  // A search hit moves the vim cursor too, so j/k and comments continue from the match.
+  if (self.findReveal && file && currentMatch != null) {
+    const hit = entries[currentMatch].row && cursorTargets([entries[currentMatch].row], { split, side: self.vimSide })[0];
+    if (hit && !holdsCursor(entries[currentMatch].row, cursor, split)) {
+      self.cursor = { path: file.path, side: hit.side, line: hit.line, index: -1 }; cx.notify();
+    }
+  }
   if (self.findReveal && eager && currentMatch != null) { self.diffScroll.scroll_to_item(currentMatch); self.findReveal = false; }
+  else if (self.cursorReveal) {
+    const at = eager ? entries.findIndex(entry => entry.row && holdsCursor(entry.row, cursor, split)) : -1;
+    if (at >= 0) self.diffScroll.scroll_to_item(at);
+    self.cursorReveal = false;
+  }
   const diff = v_flex().id("full-diff-frame").relative().flex_1().min_h(0)
     .on_mouse_down("left", event => { self.diffPress = { event, path: file?.path, revision: snapshot?.revision }; self.diffRelease = null; })
     .on_mouse_down("right", event => { self.diffPress = { event, path: file?.path, revision: snapshot?.revision }; })
@@ -225,7 +241,7 @@ export function renderFull(self, cx) {
         .child(div().flex_1().min_w(0).truncate().font_semibold().text_size(12).child(selection ? `${selection.side === "old" ? "Old" : "New"} L${selection.start}–${selection.end}` : `File comment · ${file?.path ?? ""}`))
         .child(self.button("full-file-note", "Whole file", cx => self.fileNote(cx), Boolean(file)))
         .child(self.button("full-cancel", "Cancel", cx => self.cancelDraft(cx))))
-      .child(Textarea.new(self.editor).h(70).w_full().text_size(13))
+      .child(self.commentBox(Textarea.new(self.editor).h(70).w_full().text_size(13)))
       .child(h_flex().justify_end().items_center()
         .child(self.button("full-save", "+ Save comment", cx => self.saveComment(cx), self.canSaveComment(), "primary")))));
 
@@ -240,7 +256,7 @@ export function renderFull(self, cx) {
       .child(div().font_semibold().text_size(12).text_color(selection ? t.accent : t.foreground)
         .child(selection ? `${selection.side === "old" ? "Old" : "New"} L${selection.start}–${selection.end}` : "Comment on this file"))
       .child(self.selectableText("full-inspector-path", file?.path ?? "Select a file").truncate().text_size(11).text_color(t.dim))
-      .child(Textarea.new(self.editor).h(110).w_full().text_size(13))
+      .child(self.commentBox(Textarea.new(self.editor).h(110).w_full().text_size(13)))
       .child(h_flex().gap(5)
         .child(self.button("full-file-note", "Whole file", cx => self.fileNote(cx), Boolean(file)))
         .child(self.button("full-cancel", "Cancel", cx => self.cancelDraft(cx), hasDraft || Boolean(selection))))
