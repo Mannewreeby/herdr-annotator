@@ -1,5 +1,5 @@
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, v_resizable, resizable_panel, v_virtual_list, Scrollbar, TextareaState, Textarea, TextView, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, v_resizable, resizable_panel, v_virtual_list, Scrollbar, TextareaState, Textarea, TextView, InputState, Input, ScrollHandle } from "gpui-base";
 import { spaces, panes, focused, agents, exec, home, props, theme, settings, shared, setShared, run, layout, appHome, watchFolder, machines, nextCommand } from "herdr";
 import { selectionFor, selectionPayload, selected, inlineAt, pendingComments, sessionTarget, fileStats, pathParts, commentStatus, commentLocation, reviewSummary, sendHint, unreadItems, visibleComments, layoutSidebar, reviewSidebarTransition, fullPreferences, snapshotFailure, needsFreshSnapshot, savedBaseChoice } from "./review.js";
 import { renderFull } from "./full.js";
@@ -64,6 +64,11 @@ export default class Annotator extends View {
     this.blankReviewNote = this.createReviewNote();
     this.ensureReviewNote(contextKey());
     this.handle = cx.focus_handle();
+    this.diffScroll = ScrollHandle.new();
+    this.findOpen = false; this.findIndex = 0; this.findMatches = [];
+    this.findEditor = InputState.new({ placeholder: "Find in diff" });
+    this.findEditor.on("change", (_e, cx) => { this.findIndex = 0; this.findReveal = true; cx.notify(); });
+    this.findEditor.on("submit", (event, cx) => this.findStep(event.shift ? -1 : 1, cx));
     this.updates = new UpdateController({ exec, shared, setShared, storage: sessionStorage,
       script: `${home()}/.local/share/herdr-annotator/update.py`, appHome: appHome(),
       ready: cx => { if (!this.closed && !this.data && !this._busy) this.refresh(cx); } });
@@ -570,6 +575,9 @@ export default class Annotator extends View {
       if (file) { this.copyText(copiedSelection(file, this.selection), cx); cx.stop_propagation(); }
       return;
     }
+    if (["cmd-f", "ctrl-f"].includes(event.keystroke) && this.full && this.view === "diff") {
+      this.openFind(cx); cx.stop_propagation(); return;
+    }
     const chord = ["cmd-enter", "ctrl-enter", "cmd-return", "ctrl-return"].includes(event.keystroke);
     if (chord && !event.is_held && !event.modifiers?.shift && !event.modifiers?.alt) {
       // Textareas own their submit events. Handling the same press here too
@@ -579,6 +587,7 @@ export default class Annotator extends View {
       return;
     }
     if (event.key === "escape") {
+      if (this.findOpen) { this.closeFind(cx); return; }
       if (this.reviewSendOpen) this.cancelReviewSend(cx);
       this.requeue = null; this.exportText = null; this.orderModelOpen = false;
       this.reviewOptionsOpen = false; this.fileActionsOpen = false; this.scopeMenuOpen = false; this.fileMenu = null; cx.notify();
@@ -999,6 +1008,21 @@ export default class Annotator extends View {
         .child(item("copy-path", "Copy path", cx => this.copyText(menu.path, cx)))
         .child(item("copy-absolute", "Copy absolute path", cx => this.copyText(`${this.data.snapshot.scope.repo.replace(/\/$/, "")}/${menu.path}`, cx)))
         .child(item("vscode", "Open in VS Code", cx => this.openInEditor(menu, cx), !menu.status.includes("D")))));
+  }
+
+  openFind(cx) {
+    this.findOpen = true; this.findReveal = true; this.findEditor.focus(); cx.notify();
+  }
+
+  closeFind(cx) {
+    this.findOpen = false; this.findMatches = []; this.focusReview(); cx.notify();
+  }
+
+  findStep(delta, cx) {
+    const count = this.findMatches.length;
+    if (!count) return;
+    this.findIndex = (this.findIndex + delta + count) % count;
+    this.findReveal = true; cx.notify();
   }
 
   loadLargeDiff(cx) {

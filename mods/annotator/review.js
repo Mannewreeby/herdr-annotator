@@ -137,6 +137,16 @@ export function entryText(entry, side = "new") {
   return row.old != null || row.new != null ? row.text : null;
 }
 
+export function searchMatches(entries, query) {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [];
+  const matches = [];
+  entries.forEach((entry, index) => {
+    if (["old", "new"].some(side => entryText(entry, side)?.toLowerCase().includes(needle))) matches.push(index);
+  });
+  return matches;
+}
+
 // The line to open: the selected new-side line, else the first added line.
 export function editorLine(file, selection) {
   if (selection?.side === "new") return selection.start;

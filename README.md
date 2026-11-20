@@ -50,6 +50,8 @@ Diff source text supports native text selection and **⌘C / Ctrl+C** within a
 line. To copy several lines, select a line range and click **Copy lines**.
 The review pane also copies the selected range with **⌘C / Ctrl+C** when it
 has keyboard focus. Copies contain source text, without gutters or diff markers.
+In full review, **⌘F / Ctrl+F** (or **Find**) searches the open diff: Enter and
+Shift+Enter step through matches, Esc closes.
 Right-click a file in the list to copy its relative or absolute path, or open it
 in VS Code at the selected or first changed line (remote checkouts through
 VS Code Remote-SSH).

@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { selectionFor, selectionPayload, selected, inlineAt, pendingComments, sessionTarget, fileStats, pathParts, commentStatus, commentLocation, reviewSummary, sendHint, visibleComments, unreadItems, snapshotFailure, diffReaderEntries, splitRows, contextGaps, reviewTargetReady, reviewTotals, editorLine, editorArgs, rangeText, entryText, dragSide } from "../mods/annotator/review.js";
+import { selectionFor, selectionPayload, selected, inlineAt, pendingComments, sessionTarget, fileStats, pathParts, commentStatus, commentLocation, reviewSummary, sendHint, visibleComments, unreadItems, snapshotFailure, diffReaderEntries, splitRows, contextGaps, reviewTargetReady, reviewTotals, editorLine, editorArgs, rangeText, entryText, dragSide, searchMatches } from "../mods/annotator/review.js";
+
+test("diff search matches either side, ignoring case, and skips headers", () => {
+  const entries = [{ row: { kind: "hunk", text: "@@ fee @@" } }, { row: { kind: "delete", old: 2, text: "Fee / 10" } },
+    { comments: [] }, { row: { kind: "change", old: { text: "a" }, new: { text: "new fee" } } }, { gap: "↕" }];
+  assert.deepEqual(searchMatches(entries, "FEE"), [1, 3]);
+  assert.deepEqual(searchMatches(entries, "  "), []);
+});
 
 test("drag copy covers rows in either direction and skips headers and notes", () => {
   const entries = [{ row: { kind: "hunk", text: "@@" } }, { row: { kind: "context", old: 1, new: 1, text: "a" } },

@@ -73,6 +73,7 @@ function harness() {
       state.virtual = { id, count, size, key, render };
       return result;
     },
+    ScrollHandle: { new: () => ({ scroll_to_item: index => { state.scrolledTo = index; }, release() {} }) },
     Scrollbar: { vertical: node }, Select: { new: id => node().id(id) }, Popup: { new: (id, trigger) => node().id(id).child(trigger) },
     list: (id, count, key, render) => {
       const result = node().id(id);
@@ -455,6 +456,32 @@ test("a drag over diff text hands the keyboard back so Cmd/Ctrl+C copies", async
   assert.equal(h.state.clipboard, "changed line");
   h.mod.dragStart(0, { position: { x: 5, y: 5 } }); h.mod.dragEnd(0, { position: { x: 5, y: 5 } }, () => ["x"]);
   assert.equal(h.mod.dragCopyText, null, "a plain click is not a drag");
+});
+
+test("full review finds text in the diff with Cmd/Ctrl+F and steps between matches", async () => {
+  const h = harness(); h.state.props = { presentation: "full" };
+  h.mod.init({}, h.cx); await h.drain(); h.mod.eagerRowLimit = 1500;
+  h.mod.data.snapshot.files[0].rows = [
+    { kind: "hunk", text: "@@ -1,3 +1,3 @@" },
+    { kind: "context", old: 1, new: 1, text: "const fee = 1;" },
+    { kind: "add", old: null, new: 2, text: "other" },
+    { kind: "add", old: null, new: 3, text: "return FEE;" },
+  ];
+  h.mod.handleKey({ key: "f", keystroke: "cmd-f", modifiers: {} }, h.cx);
+  assert.equal(h.mod.findOpen, true);
+  h.mod.findEditor.set_value("fee"); h.mod.findEditor.emit("change", {});
+  h.nodes.length = 0; h.mod.render(h.cx);
+  assert.equal(h.mod.findMatches.length, 2);
+  assert.ok(h.nodes.some(n => n.children.includes("1 / 2")));
+  const first = h.state.scrolledTo;
+  h.mod.findEditor.emit("submit", {}); h.nodes.length = 0; h.mod.render(h.cx);
+  assert.ok(h.nodes.some(n => n.children.includes("2 / 2")));
+  assert.notEqual(h.state.scrolledTo, first, "Enter reveals the next match");
+  h.mod.findEditor.emit("submit", { shift: true }); h.nodes.length = 0; h.mod.render(h.cx);
+  assert.equal(h.state.scrolledTo, first, "Shift+Enter goes back");
+  h.mod.handleKey({ key: "escape", keystroke: "escape", modifiers: {} }, h.cx);
+  assert.equal(h.mod.findOpen, false);
+  assert.equal(h.requests.filter(r => ["send", "ask", "add"].includes(r.op)).length, 0);
 });
 
 test("Cmd/Ctrl+C copies selected lines while the empty comment box has focus", async () => {

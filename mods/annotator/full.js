@@ -1,7 +1,7 @@
 import { div, list } from "gpui-kit";
-import { v_flex, h_flex, h_resizable, resizable_panel, v_virtual_list, Scrollbar, Textarea } from "gpui-base";
+import { v_flex, h_flex, h_resizable, resizable_panel, v_virtual_list, Scrollbar, Textarea, Input } from "gpui-base";
 import { theme, settings, setShared } from "herdr";
-import { splitRows, splitSelectionRow, selected, pendingComments, unreadItems, visibleComments, fileStats, diffReaderEntries, commentStatus, commentLocation, deliveryBlocker, reviewTargetReady, contextGaps, copiedSelection, reviewTotals, entryText } from "./review.js";
+import { splitRows, splitSelectionRow, selected, pendingComments, unreadItems, visibleComments, fileStats, diffReaderEntries, commentStatus, commentLocation, deliveryBlocker, reviewTargetReady, contextGaps, copiedSelection, reviewTotals, entryText, searchMatches } from "./review.js";
 
 function pageCards(self, id, items, render) {
   self.cardPages ??= new Map();
@@ -86,7 +86,15 @@ export function renderFull(self, cx) {
   const target = self.currentSession(), unread = comments.filter(c => !c.read).length + threads.filter(c => !c.read).length;
   const sendBlocked = deliveryBlocker(target, reviewDrafts, self.reviewNote.uncertain);
   const listId = `full-diff-${file?.path ?? "empty"}-${self.diffStyle}`;
-  const renderEntry = entry => {
+  const matches = self.findOpen ? searchMatches(entries, self.findEditor.value()) : [];
+  self.findMatches = matches;
+  if (self.findIndex >= matches.length) self.findIndex = 0;
+  const matchSet = new Set(matches), currentMatch = matches[self.findIndex];
+  const renderEntry = (entry, index) => matchSet.has(index)
+    ? div().w_full().border_l(3).border_color(index === currentMatch ? t.accent : t.accent + "55")
+      .when(index === currentMatch, el => el.bg(t.accent + "22")).child(renderRow(entry))
+    : renderRow(entry);
+  const renderRow = entry => {
     if (entry.gap) return div().w_full().min_h(30).px(14).py(6).bg(t.raised).text_color(t.accent).cursor_pointer().child(entry.gap);
     if (entry.row) return diffRow(entry.row, split, selection, t, font, marks, self, highlights);
     return entry.comments.length ? v_flex().children(entry.comments.map(comment => inlineNote(comment, comment.id === self.activeComment, t, self))) : div().h(0);
@@ -141,14 +149,16 @@ export function renderFull(self, cx) {
   // Ordinary diffs render eagerly; only very large ones use the lazy list.
   const eager = entries.length <= (self.eagerRowLimit ?? 1500);
   const rowsView = eager
-    ? v_flex().id(listId).size_full().overflow_y_scroll().children(entries.map((entry, index) => div().id(`entry-${entry.key}`).w_full()
+    ? v_flex().id(listId).size_full().overflow_y_scroll().track_scroll(self.diffScroll).children(entries.map((entry, index) => div().id(`entry-${entry.key}`).w_full()
       .on_click((_e, cx) => itemClick(entry.key, cx))
       .on_mouse_down("left", event => self.dragStart(index, event))
       .on_mouse_up("left", event => self.dragEnd(index, event, side => entries.map(entry => entryText(entry, side))))
       .on_mouse_down("right", (event, cx) => itemSecondary(entry.key, event, cx))
-      .child(renderEntry(entry))))
-    : list(listId, entries.length, index => entries[index].key, index => renderEntry(entries[index]))
+      .child(renderEntry(entry, index))))
+    : list(listId, entries.length, index => entries[index].key, index => renderEntry(entries[index], index))
       .size_full().on_item_click(itemClick).on_item_secondary_click(itemSecondary);
+  // Only the eager rows scroll from code; GPUI's lazy list ignores handles.
+  if (self.findReveal && eager && currentMatch != null) { self.diffScroll.scroll_to_item(currentMatch); self.findReveal = false; }
   const diff = v_flex().id("full-diff-frame").relative().flex_1().min_h(0)
     .on_mouse_down("left", event => { self.diffPress = { event, path: file?.path, revision: snapshot?.revision }; self.diffRelease = null; })
     .on_mouse_down("right", event => { self.diffPress = { event, path: file?.path, revision: snapshot?.revision }; })
@@ -175,7 +185,16 @@ export function renderFull(self, cx) {
            .when(Boolean(selection), el => el.child(self.button("copy-full-source-selection", "Copy lines", cx => self.copyText(copiedSelection(file, selection), cx))))
           .child(self.button("full-prev-file", "‹", cx => self.selectFile(files[fileIndex - 1].path, cx), fileIndex > 0))
           .child(self.button("full-next-file", "›", cx => self.selectFile(files[fileIndex + 1].path, cx), fileIndex >= 0 && fileIndex + 1 < files.length))
+          .child(self.button("full-find", "Find", cx => self.findOpen ? self.closeFind(cx) : self.openFind(cx), Boolean(file), self.findOpen ? "secondary" : "quiet").tooltip("Find in diff · ⌘F / Ctrl+F"))
           .child(self.button("full-file-actions", "File ▾", cx => { self.fileActionsOpen = !self.fileActionsOpen; cx.notify(); })))
+        .when(self.findOpen, el => el.child(h_flex().id("full-find-bar").px(12).py(4).gap(6).items_center()
+          .child(Input.new(self.findEditor).id("full-find-input").flex_1().min_w(0).h(28).px(8).rounded(5)
+            .bg(t.background).border_1().border_color(t.border))
+          .child(div().text_size(11).text_color(matches.length || !self.findEditor.value().trim() ? t.dim : t.ansi1)
+            .child(self.findEditor.value().trim() ? matches.length ? `${self.findIndex + 1} / ${matches.length}` : "No matches" : ""))
+          .child(self.button("full-find-prev", "↑", cx => self.findStep(-1, cx), matches.length > 1).tooltip("Previous · Shift+Enter"))
+          .child(self.button("full-find-next", "↓", cx => self.findStep(1, cx), matches.length > 1).tooltip("Next · Enter"))
+          .child(self.button("full-find-close", "×", cx => self.closeFind(cx)).tooltip("Close · Esc"))))
         .when(self.fileActionsOpen, el => el.child(h_flex().id("full-file-options").px(10).py(4).gap(4).flex_wrap().items_center()
           .child(self.button("full-context-more", "+20 context", cx => self.expandContext(Math.min(1000000, self.contextLines + 20), cx), Boolean(file) && self.contextLines < 1000000))
           .child(self.button("full-context-all", "Full context", cx => self.expandContext(1000000, cx), Boolean(file) && self.contextLines < 1000000))
