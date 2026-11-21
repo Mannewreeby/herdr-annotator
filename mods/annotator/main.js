@@ -78,6 +78,7 @@ export default class Annotator extends View {
     this.nvim = new NvimBox({ exec, hc, readFile: readTextFile, socket: `/tmp/annotator-nvim-${home().split("/").pop()}.sock`,
       bridge: `${appHome()}/mods/annotator/nvim-bridge.lua` });
     this.diffScroll = ScrollHandle.new();
+    this.rowPool = new Map();
     this.sidebarScroll = ScrollHandle.new();
     this.vimKeys = EMPTY_KEYS; this.cursor = null; this.visual = null; this.vimSide = "new";
     // A new review tab opens with the cursor on the first change; claimKeyboard gives it the keys.

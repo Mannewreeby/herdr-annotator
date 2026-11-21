@@ -1,4 +1,4 @@
-import { div, list } from "gpui-kit";
+import { View, div, list } from "gpui-kit";
 import { v_flex, h_flex, h_resizable, resizable_panel, v_virtual_list, Scrollbar, Textarea, Input } from "gpui-base";
 import { theme, settings, setShared } from "herdr";
 import { holdsCursor, cursorTargets } from "./vim.js";
@@ -16,13 +16,15 @@ function pageCards(self, id, items, render) {
       .child(self.button(`${id}-next`, "Next", cx => { self.cardPages.set(id, page + 1); cx.notify(); }, page + 1 < pages))));
 }
 
+const markKey = (row, side) => `${side ?? (row.new != null ? "new" : "old")}:${(side ? row[side] : null) ?? row.new ?? row.old}`;
+
 // Pure row builders: deferred native list renderers cannot register handlers.
 function codeCell(row, side, selection, t, marks, self, highlights, here = false) {
   if (!row) return div().flex_1().min_w(0).bg(t.raised);
   const active = selected(row, selection) && (!side || selection?.side === side);
   const color = row.kind === "add" ? t.ansi2 : row.kind === "delete" ? t.ansi1 : t.dim;
   const number = side ? row[side] : null;
-  const count = marks.get(`${side ?? (row.new != null ? "new" : "old")}:${number ?? row.new ?? row.old}`) ?? 0;
+  const count = marks.get(markKey(row, side)) ?? 0;
   return h_flex().flex_1().min_w(0).min_h(26).py(3).pr(12).gap(9).items_start()
     .bg(active ? t.selected : here ? t.accent + "22" : row.kind === "add" ? t.ansi2 + "18" : row.kind === "delete" ? t.ansi1 + "18" : t.background)
     .border_l(2).border_color(active || here ? t.accent : t.border)
@@ -43,6 +45,40 @@ function diffRow(row, split, selection, t, font, marks, self, highlights, cursor
       .child(codeCell(row.old, "old", selection, t, marks, self, highlights, cursor?.side === "old" && holdsCursor(row, cursor, true)))
       .child(codeCell(row.new, "new", selection, t, marks, self, highlights, cursor?.side === "new" && holdsCursor(row, cursor, true))))
     .when(!split, el => el.child(codeCell(row, null, selection, t, marks, self, highlights, holdsCursor(row, cursor, false))));
+}
+
+/**
+ * Retained diff rows. Rebuilding every row on each keypress made cursor moves
+ * slow in large diffs; a retained row rebuilds only when its look changes, so
+ * moving the cursor redraws two rows. Entities cannot be created or updated
+ * during render, so the pool catches up one tick after the render that needs it.
+ */
+function rowViewClass(self) {
+  return self.rowViewClass ??= class DiffRowView extends View {
+    init(props) { this.key = props.key; }
+    render() { return self.fullFrame?.element(this.key) ?? div(); }
+  };
+}
+
+function queueRowSync(self, wanted, cx) {
+  self.rowWanted = wanted;
+  if (self.rowSyncQueued) return;
+  self.rowSyncQueued = true;
+  cx.spawn(async cx => {
+    await cx.sleep(0);
+    self.rowSyncQueued = false;
+    if (typeof cx.new !== "function") return;
+    const keep = new Set();
+    let created = false;
+    for (const { key, sig } of self.rowWanted) {
+      keep.add(key);
+      const slot = self.rowPool.get(key);
+      if (!slot) { self.rowPool.set(key, { sig, entity: cx.new(rowViewClass(self), { key }) }); created = true; }
+      else if (slot.sig !== sig) { slot.sig = sig; slot.entity.set_props({ key, sig }); }
+    }
+    for (const [key, slot] of self.rowPool) if (!keep.has(key)) { slot.entity.release(); self.rowPool.delete(key); }
+    if (created) cx.notify();
+  });
 }
 
 function inlineNote(comment, active, t, self) {
@@ -152,21 +188,44 @@ export function renderFull(self, cx) {
   // view's copy action: text highlights there but Cmd/Ctrl+C copies nothing.
   // Ordinary diffs render eagerly; only very large ones use the lazy list.
   const eager = entries.length <= (self.eagerRowLimit ?? 1500);
+  // Handlers resolve the row through the latest frame, so a retained row that
+  // was not rebuilt still clicks, drags and copies against current data.
+  const indexByKey = new Map(entries.map((entry, index) => [entry.key, index]));
+  const entryElement = (entry, index) => div().id(`entry-${entry.key}`).w_full()
+    .on_click((_e, cx) => self.fullFrame.itemClick(entry.key, cx))
+    .on_mouse_down("left", event => self.dragStart(self.fullFrame.indexOf(entry.key), event))
+    .on_mouse_up("left", event => self.dragEnd(self.fullFrame.indexOf(entry.key), event, side => self.fullFrame.entries.map(entry => entryText(entry, side))))
+    .on_mouse_down("right", (event, cx) => self.fullFrame.itemSecondary(entry.key, event, cx))
+    .child(renderEntry(entry, index));
+  self.fullFrame = { entries, itemClick, itemSecondary, indexOf: key => indexByKey.get(key),
+    element: key => { const index = indexByKey.get(key); return index == null ? div().h(0) : entryElement(entries[index], index); } };
+  // Everything a row's pixels depend on; a retained row is reused only while this matches.
+  const scope = JSON.stringify([snapshot?.revision, file?.path, split, self.contextLines, self.syntax, Boolean(highlights), font]);
+  const cellLook = (row, side, here) => row ? [selected(row, selection) && (!side || selection?.side === side), here, marks.get(markKey(row, side)) ?? 0] : null;
+  const rowLook = row => row.kind === "hunk" || row.kind === "meta" ? row.text
+    : split ? [cellLook(row.old, "old", cursor?.side === "old" && holdsCursor(row, cursor, true)), cellLook(row.new, "new", cursor?.side === "new" && holdsCursor(row, cursor, true))]
+    : cellLook(row, null, holdsCursor(row, cursor, false));
+  const wanted = [];
+  const rowItem = (entry, index) => {
+    if (!entry.row) return entryElement(entry, index);
+    const sig = scope + JSON.stringify([rowLook(entry.row), matchSet.has(index) ? index === currentMatch ? 2 : 1 : 0]);
+    wanted.push({ key: entry.key, sig });
+    const slot = self.rowPool.get(entry.key);
+    return slot?.sig === sig ? slot.entity : entryElement(entry, index);
+  };
   const rowsView = eager
-    ? v_flex().id(listId).size_full().overflow_y_scroll().track_scroll(self.diffScroll).children(entries.map((entry, index) => div().id(`entry-${entry.key}`).w_full()
-      .on_click((_e, cx) => itemClick(entry.key, cx))
-      .on_mouse_down("left", event => self.dragStart(index, event))
-      .on_mouse_up("left", event => self.dragEnd(index, event, side => entries.map(entry => entryText(entry, side))))
-      .on_mouse_down("right", (event, cx) => itemSecondary(entry.key, event, cx))
-      .child(renderEntry(entry, index))))
+    ? entries.reduce((view, entry, index) => view.child(rowItem(entry, index)),
+      v_flex().id(listId).size_full().overflow_y_scroll().track_scroll(self.diffScroll))
     : list(listId, entries.length, index => entries[index].key, index => renderEntry(entries[index], index))
       .size_full().on_item_click(itemClick).on_item_secondary_click(itemSecondary);
+  queueRowSync(self, wanted, cx);
   // Only the eager rows scroll from code; GPUI's lazy list ignores handles.
   // A search hit moves the vim cursor too, so j/k and comments continue from the match.
   if (self.findReveal && file && currentMatch != null) {
     const hit = entries[currentMatch].row && cursorTargets([entries[currentMatch].row], { split, side: self.vimSide })[0];
     if (hit && !holdsCursor(entries[currentMatch].row, cursor, split)) {
-      self.cursor = { path: file.path, side: hit.side, line: hit.line, index: -1 }; cx.notify();
+      self.cursor = { path: file.path, side: hit.side, line: hit.line, index: -1 };
+      cx.spawn(async cx => { await cx.sleep(0); cx.notify(); });
     }
   }
   if (self.findReveal && eager && currentMatch != null) { self.diffScroll.scroll_to_item(currentMatch); self.findReveal = false; }

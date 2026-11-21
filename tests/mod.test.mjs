@@ -2219,3 +2219,25 @@ test("returning to a review tab from another tab gives it the keyboard again", a
   h.state.focus = review; h.mod.render(h.cx); await h.drain();
   assert.equal(h.state.reviewFocused, true, "vim keys work again without a click");
 });
+
+test("moving the cursor in the full review rebuilds only the two rows that changed", async () => {
+  const h = harness(); h.state.props = { presentation: "full" };
+  const rows = [{ kind: "hunk", text: "@@ -1,40 +1,40 @@" },
+    ...Array.from({ length: 40 }, (_, n) => ({ kind: n % 7 === 3 ? "add" : "context", old: n % 7 === 3 ? null : n + 1, new: n + 1, text: `  let total_${n} = order.lines[${n}].price;` }))];
+  const created = [], updated = [];
+  h.cx.new = (_Class, props) => { const entity = { key: props.key, set_props: next => updated.push(next.key), release: () => true }; created.push(entity); return entity; };
+  h.mod.init({}, h.cx); await h.drain();
+  h.mod.eagerRowLimit = 5000;
+  h.mod.data.snapshot.files[0] = { path: "src/order.rs", status: " M", loaded: true, truncated: false, rows };
+  h.mod.open = "src/order.rs";
+  h.mod.render(h.cx); await h.drain();
+  assert.equal(created.length, rows.length, "every diff row becomes a retained view once");
+
+  h.mod.focusReview();
+  const press = k => h.mod.handleKey({ key: k, keystroke: k, key_char: k, modifiers: {} }, h.cx);
+  press("]"); press("c"); h.mod.render(h.cx); await h.drain();
+  updated.length = 0;
+  press("j"); h.mod.render(h.cx); await h.drain();
+  assert.equal(updated.length, 2, "only the old and new cursor rows rebuild");
+  assert.equal(created.length, rows.length, "no rows are recreated");
+});
