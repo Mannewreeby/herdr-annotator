@@ -164,6 +164,12 @@ It also installs a private tabs mod with **[Changes | ↗]**: Changes toggles th
 sidebar; ↗ opens full review directly. Shipped mods stay untouched. Rerun with
 the same `--layout` to update both integrations.
 
+If you use your own **+** menu (a clone of Herdr's `new-menu`), pass
+`--new-menu <mod>` once; the private tabs mod then opens it, sized by the
+`overlay` width/height in that mod's `mod.json`. Later installs remember it,
+so regenerating the tabs mod after a Herdr update keeps your menu.
+`--new-menu new-menu` goes back to Herdr's.
+
 ## Data and delivery
 
 Comments stay on your app machine. Git and GitHub review reads do not modify the

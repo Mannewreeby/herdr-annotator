@@ -13,6 +13,8 @@ from tabs_integration import integrated_tabs
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--layout", action="append", default=[], help="Personal layout whose Changes panel should use this mod; repeat for multiple layouts")
+parser.add_argument("--new-menu", help="Personal mod the tab bar's + button opens instead of Herdr's new-menu; "
+                    "remembered for later installs (pass new-menu to go back). Its mod.json overlay width/height size the popup")
 parser.add_argument("--expected-commit", help=argparse.SUPPRESS)
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
@@ -40,6 +42,17 @@ def check_release_source():
         if head != args.expected_commit or dirty:
             parser.error("Release checkout changed during the update; no installed files were replaced")
 check_release_source()
+new_menu_name = args.new_menu or installed.get("new_menu")
+new_menu_name = None if new_menu_name == "new-menu" else new_menu_name
+new_menu = None
+if new_menu_name:
+    if Path(new_menu_name).name != new_menu_name:
+        parser.error("--new-menu takes a mod folder name, not a path")
+    try:
+        overlay = json.loads((app_home / "mods" / new_menu_name / "mod.json").read_text()).get("overlay", {})
+    except (OSError, ValueError) as error:
+        parser.error(f"Personal + menu mod is missing or unreadable: {error}")
+    new_menu = {"mod": new_menu_name, **{key: overlay[key] for key in ("width", "height") if key in overlay}}
 layout = None
 layouts = []
 tabs_mod = app_home / "mods/annotator-tabs"
@@ -90,7 +103,7 @@ for layout_name in dict.fromkeys(args.layout):
     layouts.append((layout, tree))
 if layouts or installed.get("tabs_files"):
     try:
-        tabs_source = integrated_tabs((app_home / "mods/tabs/main.js").read_text())
+        tabs_source = integrated_tabs((app_home / "mods/tabs/main.js").read_text(), new_menu)
     except (OSError, ValueError) as error:
         parser.error(str(error))
     tabs_files = {"main.js": tabs_source, "mod.json": '{"place":"none","title":"Annotator tabs"}\n',
@@ -159,6 +172,7 @@ receipt_temp = receipt.with_name(f".install-{stamp}.json")
 receipt_temp.write_text(json.dumps({"repo": str(root), "binary": str(binary), "mod": str(mod), "app_home": str(app_home),
                               "version": version, "commit": commit, "binary_digest": digest(binary), "updater_digest": digest(updater),
                               "layouts": sorted(set(installed.get("layouts", [])) | set(args.layout)), "tools": tools,
+                              **({"new_menu": new_menu_name} if new_menu_name else {}),
                               "files": {name: digest(mod / name) for name in files},
                               **({"tabs_files": installed["tabs_files"]} if installed.get("tabs_files") else {})}, indent=2) + "\n")
 os.replace(receipt_temp, receipt)

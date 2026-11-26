@@ -29,7 +29,8 @@ class InstallerTest(unittest.TestCase):
         (self.repo / "target/release").mkdir(parents=True)
         (self.repo / "target/release/herdr-annotator").write_text("helper binary")
         (self.app / "mods/tabs").mkdir(parents=True)
-        (self.app / "mods/tabs/main.js").write_text('.when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))')
+        (self.app / "mods/tabs/main.js").write_text('.when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))\n'
+                                                    '.child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))')
         (self.app / "layouts").mkdir()
         for name in ["one", "two"]:
             (self.app / "layouts" / f"{name}.json").write_text(json.dumps({"children": [
@@ -72,6 +73,29 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(self.receipt()["layouts"], ["one", "two"])
         self.assertEqual(layouts, {path: path.read_bytes() for path in layouts})
         self.assertTrue(list((self.home / ".local/share/herdr-annotator/backups").glob("*/install.json")))
+
+    def test_personal_new_menu_is_wired_into_private_tabs_and_kept_on_reinstall(self):
+        (self.app / "mods/new-menu-with-folder").mkdir(parents=True)
+        (self.app / "mods/new-menu-with-folder/mod.json").write_text(json.dumps({"place": "none", "overlay": {"height": 543}}))
+        tabs = self.app / "mods/annotator-tabs/main.js"
+        first = self.install("--layout", "one", "--new-menu", "new-menu-with-folder")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn('openOverlay({ mod: "new-menu-with-folder", kind: "popup", width: 250, height: 543 })', tabs.read_text())
+        self.assertEqual(self.receipt()["new_menu"], "new-menu-with-folder")
+        # A later plain install (for example after Herdr updates its tabs mod) keeps the personal menu.
+        second = self.install()
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn('mod: "new-menu-with-folder"', tabs.read_text())
+        reset = self.install("--new-menu", "new-menu")
+        self.assertEqual(reset.returncode, 0, reset.stderr)
+        self.assertIn('mod: "new-menu", kind: "popup", width: 250, height: 512', tabs.read_text())
+        self.assertNotIn("new_menu", self.receipt())
+
+    def test_missing_personal_new_menu_is_refused_before_installing(self):
+        result = self.install("--layout", "one", "--new-menu", "no-such-menu")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing or unreadable", result.stderr)
+        self.assertFalse((self.app / "mods/annotator").exists())
 
     def test_modified_helper_and_updater_are_refused_before_replacing_mods(self):
         first = self.install()
