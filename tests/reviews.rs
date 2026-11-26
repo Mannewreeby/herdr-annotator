@@ -631,6 +631,7 @@ fn file(lines: &[&str], first: u32) -> ChangedFile {
         status: " M".into(),
         added: None,
         removed: None,
+        fingerprint: None,
         note: None,
         truncated: false,
         loaded: true,
@@ -676,6 +677,61 @@ fn anchors_move_only_to_unique_exact_context() {
             .locate(&file(&["before", "changed", "after"], 1))
             .is_none()
     );
+}
+
+#[test]
+fn fingerprints_change_only_when_a_files_content_changes() {
+    let f = Fixture::new(true);
+    fs::write(f.repo.join("gone.txt"), "temporary\n").unwrap();
+    git(&f.repo, &["add", "gone.txt"]);
+    git(&f.repo, &["commit", "-m", "add gone"]);
+    f.change();
+    fs::remove_file(f.repo.join("gone.txt")).unwrap();
+    fs::write(f.repo.join("notes.txt"), "untracked and untouched\n").unwrap();
+    let fingerprints = |snapshot: Value| -> std::collections::HashMap<String, Value> {
+        snapshot["snapshot"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| {
+                (
+                    file["path"].as_str().unwrap().to_owned(),
+                    file["fingerprint"].clone(),
+                )
+            })
+            .collect()
+    };
+    let objects = || walk_count(&f.repo.join(".git/objects"));
+    let (index, stored) = (fs::read(f.repo.join(".git/index")).unwrap(), objects());
+
+    let first = fingerprints(f.snapshot());
+    assert_eq!(first.len(), 3, "{first:?}");
+    assert!(first.values().all(Value::is_string), "{first:?}");
+    assert_eq!(
+        first,
+        fingerprints(f.snapshot()),
+        "an unchanged checkout keeps its fingerprints"
+    );
+
+    fs::write(f.repo.join("file.txt"), "one\nchanged again\nthree\n").unwrap();
+    let second = fingerprints(f.snapshot());
+    assert_ne!(first["file.txt"], second["file.txt"]);
+    assert_eq!(first["notes.txt"], second["notes.txt"]);
+    assert_eq!(first["gone.txt"], second["gone.txt"]);
+    assert_eq!(
+        fs::read(f.repo.join(".git/index")).unwrap(),
+        index,
+        "hashing must not write the index"
+    );
+    assert_eq!(objects(), stored, "hashing must not write objects");
+}
+
+fn walk_count(dir: &Path) -> usize {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .map(|path| if path.is_dir() { walk_count(&path) } else { 1 })
+        .sum()
 }
 
 #[test]

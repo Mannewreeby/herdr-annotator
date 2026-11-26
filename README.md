@@ -185,6 +185,7 @@ typing in a comment or search box.
 | `Ctrl-d` / `Ctrl-u` | Half page down / up |
 | `]c` / `[c` | Next / previous change |
 | `]q` / `[q` | Next / previous file |
+| `x` | Toggle the file as viewed. `]q` and the › button mark the file you leave; a viewed file that changes again shows **Changed** |
 | `h` / `l` | Old / new side in split view |
 | `V` or `v` | Visual line selection; `Esc` cancels |
 | `c` `i` `a` `o` `Enter` | Comment on the line or selection |

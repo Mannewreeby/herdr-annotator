@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { selectionFor, selectionPayload, selected, inlineAt, pendingComments, sessionTarget, fileStats, pathParts, commentStatus, commentLocation, reviewSummary, sendHint, visibleComments, unreadItems, snapshotFailure, diffReaderEntries, splitRows, contextGaps, reviewTargetReady, reviewTotals, editorLine, editorArgs, rangeText, entryText, dragSide, searchMatches } from "../mods/annotator/review.js";
+import { selectionFor, selectionPayload, selected, inlineAt, pendingComments, sessionTarget, fileStats, pathParts, commentStatus, commentLocation, reviewSummary, sendHint, visibleComments, unreadItems, snapshotFailure, diffReaderEntries, splitRows, contextGaps, reviewTargetReady, reviewTotals, editorLine, editorArgs, rangeText, entryText, dragSide, searchMatches, viewedKey, viewedState, withViewed, storeViewed, viewedCount } from "../mods/annotator/review.js";
 
 test("diff search matches either side, ignoring case, and skips headers", () => {
   const entries = [{ row: { kind: "hunk", text: "@@ fee @@" } }, { row: { kind: "delete", old: 2, text: "Fee / 10" } },
@@ -196,4 +196,33 @@ test("file statistics and comment locations make anchors legible", () => {
   assert.equal(commentLocation({ position: { side: "new", start: 2, end: 4 } }), "L2–4");
   assert.equal(commentLocation({ stale: true, anchor: { lines: { selection: { side: "old", start: 3, end: 3 } } } }), "Was old L3");
   assert.equal(commentLocation({ position: null }), "File comment");
+});
+
+test("viewed marks survive new commits but flag files whose content changed since", () => {
+  const scope = { repo: "/Users/dev/city-web", machine: null, comparison: { mode: "branch", base: "develop" } };
+  const pricing = { path: "src/pricing.ts", status: "M", added: 4, removed: 1, fingerprint: "a1" };
+  const readme = { path: "README.md", status: "M", added: 2, removed: 0, fingerprint: "b1" };
+  let marks = withViewed({}, pricing, true);
+  marks = withViewed(marks, readme, true);
+  assert.equal(viewedState(marks, pricing), "viewed");
+  assert.equal(viewedCount(marks, [pricing, readme, { path: "draft.ts", draftOnly: true }]), 2);
+
+  // An agent pushes a fix to pricing.ts: same review key, new fingerprint.
+  const before = viewedKey({ scope, branch: "KVN-837", head: "c0ffee", files: [pricing] });
+  const after = viewedKey({ scope, branch: "KVN-837", head: "facade", files: [pricing] });
+  assert.equal(before, after);
+  assert.equal(viewedState(marks, { ...pricing, fingerprint: "a2" }), "changed");
+  assert.equal(viewedState(marks, readme), "viewed");
+
+  assert.equal(viewedState(withViewed(marks, readme, false), readme), null);
+  // Without a fingerprint (submodules) status and line counts stand in.
+  const submodule = { path: "vendor/sdk", status: "M", added: null, removed: null };
+  assert.equal(viewedState(withViewed({}, submodule, true), submodule), "viewed");
+});
+
+test("each review keeps its own marks and only the newest reviews are stored", () => {
+  const stored = storeViewed([{ key: "old", files: { "a.ts": "x" } }], "current", { "b.ts": "y" }, 2);
+  assert.deepEqual(stored.map(entry => entry.key), ["old", "current"]);
+  assert.deepEqual(storeViewed(stored, "next", { "c.ts": "z" }, 2).map(entry => entry.key), ["current", "next"]);
+  assert.deepEqual(storeViewed(stored, "current", {}).map(entry => entry.key), ["old"], "clearing the last mark drops the review");
 });

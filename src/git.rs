@@ -246,7 +246,7 @@ pub fn snapshot(scope: &Scope, view: &ViewSpec) -> Result<Snapshot> {
             "--untracked-files=all",
         ],
     )?;
-    let mut entries = std::collections::BTreeMap::<String, (String, LineStats)>::new();
+    let mut entries = std::collections::BTreeMap::<String, Listed>::new();
     if let Some(base) = baseline.as_deref() {
         let changed = required(
             &scope,
@@ -269,12 +269,18 @@ pub fn snapshot(scope: &Scope, view: &ViewSpec) -> Result<Snapshot> {
             return Err("Invalid Git status record".into());
         }
         if baseline.is_none() || entry.starts_with("?? ") {
-            entries.insert(entry[3..].to_owned(), (entry[..2].to_owned(), None));
+            entries.insert(
+                entry[3..].to_owned(),
+                Listed {
+                    status: entry[..2].to_owned(),
+                    ..Listed::default()
+                },
+            );
         }
     }
     let untracked: Vec<&String> = entries
         .iter()
-        .filter(|(_, (xy, _))| xy == "??")
+        .filter(|(_, listed)| listed.status == "??")
         .map(|(path, _)| path)
         .collect();
     let new_lines = if untracked.is_empty() {
@@ -283,17 +289,21 @@ pub fn snapshot(scope: &Scope, view: &ViewSpec) -> Result<Snapshot> {
         untracked_line_counts(&scope, &untracked)?
     };
     let limited = false;
+    if entries.keys().any(|path| !safe_path(path)) {
+        return Err("Git returned an invalid relative path".into());
+    }
+    let current = current_blobs(&scope, &entries);
     let mut files = Vec::new();
-    for (path, (xy, stats)) in &entries {
-        if !safe_path(path) {
-            return Err("Git returned an invalid relative path".into());
-        }
-        let stats = stats.or_else(|| new_lines.get(path).map(|&n| (n, 0)));
+    for (path, listed) in &entries {
+        let stats = listed
+            .stats
+            .or_else(|| new_lines.get(path).map(|&n| (n, 0)));
         let file = ChangedFile {
             path: path.to_owned(),
-            status: xy.to_owned(),
+            status: listed.status.to_owned(),
             added: stats.map(|s| s.0),
             removed: stats.map(|s| s.1),
+            fingerprint: fingerprint(listed, current.get(path)),
             rows: Vec::new(),
             note: None,
             truncated: false,
@@ -332,9 +342,16 @@ pub fn snapshot(scope: &Scope, view: &ViewSpec) -> Result<Snapshot> {
 
 type LineStats = Option<(u32, u32)>;
 
-fn changed_entries(
-    output: &str,
-) -> Result<std::collections::BTreeMap<String, (String, LineStats)>> {
+#[derive(Default)]
+struct Listed {
+    status: String,
+    stats: LineStats,
+    /// Blob at the comparison base; None for files the base does not have.
+    base_blob: Option<String>,
+    submodule: bool,
+}
+
+fn changed_entries(output: &str) -> Result<std::collections::BTreeMap<String, Listed>> {
     let mut raw = std::collections::BTreeMap::new();
     let mut content_changes = std::collections::HashMap::<String, LineStats>::new();
     let mut records = output.split_terminator('\0');
@@ -345,8 +362,14 @@ fn changed_entries(
                 return Err("Invalid Git raw diff output".into());
             }
             let path = records.next().ok_or("Missing Git raw diff path")?;
-            let structural = fields[0] != fields[1] || fields[4] != "M" || fields[0] == "160000";
-            raw.insert(path.to_owned(), (fields[4].to_owned(), structural));
+            let submodule = fields[0] == "160000" || fields[1] == "160000";
+            let structural = fields[0] != fields[1] || fields[4] != "M" || submodule;
+            let base_blob =
+                (!fields[2].trim_start_matches('0').is_empty()).then(|| fields[2].to_owned());
+            raw.insert(
+                path.to_owned(),
+                (fields[4].to_owned(), structural, base_blob, submodule),
+            );
         } else {
             let mut fields = record.splitn(3, '\t');
             let (added, removed) = (fields.next(), fields.next());
@@ -364,11 +387,64 @@ fn changed_entries(
     // and submodules too, even when no line counts are emitted.
     Ok(raw
         .into_iter()
-        .filter_map(|(path, (status, structural))| {
+        .filter_map(|(path, (status, structural, base_blob, submodule))| {
             let stats = content_changes.get(&path).copied();
-            (structural || stats.is_some()).then(|| (path, (status, stats.flatten())))
+            (structural || stats.is_some()).then(|| {
+                let stats = stats.flatten();
+                (
+                    path,
+                    Listed {
+                        status,
+                        stats,
+                        base_blob,
+                        submodule,
+                    },
+                )
+            })
         })
         .collect())
+}
+
+// Blob ids of the files as they are now, without writing objects or touching
+// the index (hash-object without -w). Best effort: a chunk Git cannot hash
+// (a symlink to a folder, a file deleted mid-listing) leaves its files without
+// a fingerprint rather than failing the whole listing.
+fn current_blobs(
+    scope: &Scope,
+    entries: &std::collections::BTreeMap<String, Listed>,
+) -> std::collections::HashMap<String, String> {
+    let present: Vec<&String> = entries
+        .iter()
+        .filter(|(_, listed)| !listed.submodule && !listed.status.contains('D'))
+        .map(|(path, _)| path)
+        .collect();
+    let mut blobs = std::collections::HashMap::new();
+    for chunk in present.chunks(200) {
+        let mut args = vec!["hash-object", "--"];
+        args.extend(chunk.iter().map(|p| p.as_str()));
+        let Ok(out) = git(scope, &args) else { continue };
+        let ids: Vec<&str> = out.text.lines().collect();
+        if out.code != 0 || out.truncated || ids.len() != chunk.len() {
+            continue;
+        }
+        blobs.extend(
+            chunk
+                .iter()
+                .zip(ids)
+                .map(|(path, id)| ((*path).to_owned(), id.to_owned())),
+        );
+    }
+    blobs
+}
+
+fn fingerprint(listed: &Listed, current: Option<&String>) -> Option<String> {
+    let now = if listed.status.contains('D') {
+        "deleted"
+    } else {
+        current?.as_str()
+    };
+    let base = listed.base_blob.as_deref().unwrap_or("");
+    Some(hash(format!("{base}\0{now}").as_bytes()))
 }
 
 // Line counts of new untracked files, without reading them into the snapshot or

@@ -11,6 +11,7 @@ import { GithubRefresh } from "./github-refresh.js";
 import { reviewLocation } from "./review.js";
 import { UpdateController } from "./updates.js";
 import { escapeText, copiedDiff, copiedSelection, contextGaps } from "./review.js";
+import { viewedKey, viewedState, withViewed, storeViewed, viewedCount } from "./review.js";
 import { reviewOrderKey, orderedReviewFiles, existingReviewTab, deliveryBlocker, reviewTargetReady, reviewedDraft, agentWaiting, reviewTotals, editorLine, editorArgs, rangeText, entryText, dragSide } from "./review.js";
 import { splitRows } from "./review.js";
 import { typedEscape, EMPTY_KEYS, VIM_HELP, readKey, cursorTargets, findCursor, changeStarts, moveIndex, rangeSelection, holdsCursor } from "./vim.js";
@@ -163,6 +164,36 @@ export default class Annotator extends View {
 
   orderEntry(snapshot = this.data?.snapshot) {
     return (shared("annotator.fileOrders") ?? []).find(entry => entry.key === reviewOrderKey(snapshot));
+  }
+
+  viewedMarks(snapshot = this.data?.snapshot) {
+    const key = viewedKey(snapshot);
+    return (shared("annotator.viewed") ?? []).find(entry => entry.key === key)?.files ?? {};
+  }
+
+  setViewed(path, viewed, cx) {
+    const snapshot = this.data?.snapshot, file = snapshot?.files.find(f => f.path === path);
+    if (!file) return;
+    const marks = withViewed(this.viewedMarks(snapshot), file, viewed);
+    setShared("annotator.viewed", storeViewed(shared("annotator.viewed"), viewedKey(snapshot), marks));
+    cx?.notify();
+  }
+
+  toggleViewed(path, cx) {
+    const file = this.data?.snapshot.files.find(f => f.path === path);
+    if (file) this.setViewed(path, viewedState(this.viewedMarks(), file) !== "viewed", cx);
+  }
+
+  /** Moving on to the next file counts as having looked at the one you leave. */
+  selectNextFile(path, cx) {
+    if (this.busy) return;
+    if (this.open && this.open !== path) this.setViewed(this.open, true);
+    this.selectFile(path, cx);
+  }
+
+  viewedSummary(files) {
+    const reviewable = files.filter(f => !f.draftOnly);
+    return `${viewedCount(this.viewedMarks(), reviewable)}/${reviewable.length} viewed`;
   }
 
   orderedFiles(snapshot = this.data?.snapshot) {
@@ -695,6 +726,7 @@ export default class Annotator extends View {
       }
       case "find": if (this.full && this.view === "diff") this.openFind(cx); return true;
       case "find-step": if (this.findOpen) this.findStep(action.delta * action.count, cx); return true;
+      case "viewed": if (this.open) this.toggleViewed(this.open, cx); return true;
       case "toggle-split": {
         if (!this.full) return true;
         this.diffStyle = this.diffStyle === "split" ? "unified" : "split";
@@ -754,7 +786,8 @@ export default class Annotator extends View {
     const next = files[Math.max(0, Math.min(files.length - 1, at < 0 ? 0 : at + delta))];
     if (next.path === this.open) return;
     this.visual = null; this.cursor = null; this.cursorAuto = true;
-    this.selectFile(next.path, cx);
+    if (delta > 0) this.selectNextFile(next.path, cx);
+    else this.selectFile(next.path, cx);
   }
 
   vimSideSwitch(side, cx) {
@@ -1270,6 +1303,7 @@ export default class Annotator extends View {
   // the list reports the row and the wrapper the press position.
   fileList(id, files, count, draftPaths, t) {
     const menu = this.fileMenu?.list === id ? files.find(f => f.path === this.fileMenu.path) : null;
+    const marks = this.viewedMarks();
     const item = (key, label, action, enabled = true) => h_flex().id(`file-menu-${key}`).h(28).px(10).items_center().rounded(5).text_size(12)
       .text_color(enabled ? t.foreground : t.dim)
       .when(enabled, el => el.cursor_pointer().hover(s => s.bg(t.hover))
@@ -1279,7 +1313,7 @@ export default class Annotator extends View {
       .on_mouse_down("left", (_e, cx) => { if (this.fileMenu) { this.fileMenu = null; cx.notify(); } })
       .on_mouse_down("right", event => { if (this.fileMenu) this.fileMenu.at ??= event.local_position; })
       .child(v_virtual_list(id, files.length, 42, index => files[index].path,
-        range => files.slice(range.start, range.end).map(f => this.fileRow(f, count(f.path), t, draftPaths.has(f.path))))
+        range => files.slice(range.start, range.end).map(f => this.fileRow(f, count(f.path), t, draftPaths.has(f.path), viewedState(marks, f))))
         .size_full().on_item_click((path, cx) => this.selectFile(path, cx))
         .on_item_secondary_click((path, _event, cx) => {
           this.fileMenu = files.some(f => f.path === path && !f.draftOnly) ? { list: id, path, at: null } : null; cx.notify();
@@ -1289,6 +1323,7 @@ export default class Annotator extends View {
         .left(Math.max(4, this.fileMenu.at.x - 4)).top(this.fileMenu.at.y + 2).w(190).p(4).gap(1)
         .rounded(7).bg(t.popover ?? t.surface).border_1().border_color(t.border)
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .child(item("viewed", viewedState(marks, menu) === "viewed" ? "Mark as not viewed" : "Mark as viewed", cx => this.toggleViewed(menu.path, cx)))
         .child(item("copy-path", "Copy path", cx => this.copyText(menu.path, cx)))
         .child(item("copy-absolute", "Copy absolute path", cx => this.copyText(`${this.data.snapshot.scope.repo.replace(/\/$/, "")}/${menu.path}`, cx)))
         .child(item("vscode", "Open in VS Code", cx => this.openInEditor(menu, cx), !menu.status.includes("D")))));
@@ -1588,7 +1623,7 @@ export default class Annotator extends View {
         }, true, "secondary"))));
   }
 
-  fileRow(file, count, t, draft = false) {
+  fileRow(file, count, t, draft = false, viewed = null) {
     const path = pathParts(file.path), stats = fileStats(file);
     const active = file.path === this.open;
     const code = file.draftOnly ? "·" : file.status.includes("D") ? "D" : file.status.includes("A") || file.status === "??" ? "+" : "M";
@@ -1598,13 +1633,15 @@ export default class Annotator extends View {
       .bg(active ? t.selected : t.chrome).hover(s => s.bg(t.hover))
       .child(h_flex().size(23).rounded(5).bg(color + "18").text_color(color).text_size(11).font_semibold().items_center().justify_center().flex_none().child(code))
       .child(v_flex().flex_1().min_w(0).gap(1)
-        .child(div().truncate().text_size(12.5).font_semibold().child(path.name))
+        .child(div().truncate().text_size(12.5).font_semibold().when(viewed === "viewed", el => el.text_color(t.dim)).child(path.name))
         .when(Boolean(path.folder), el => el.child(div().truncate().text_size(10.5).text_color(t.dim).child(path.folder))))
       .child(v_flex().gap(2).items_end().flex_none()
         .child(h_flex().gap(5)
           .when(stats.added > 0, el => el.child(div().text_size(10.5).text_color(t.ansi2).child(`+${stats.added}`)))
           .when(stats.removed > 0, el => el.child(div().text_size(10.5).text_color(t.ansi1).child(`−${stats.removed}`))))
         .child(h_flex().gap(3)
+          .when(viewed === "viewed", el => el.child(this.badge("✓ Viewed", t.dim)))
+          .when(viewed === "changed", el => el.child(this.badge("Changed", t.ansi3, t.ansi3 + "18")))
           .when(draft, el => el.child(this.badge("Draft", t.accent, t.accent + "18")))
           .when(count > 0, el => el.child(this.badge(`${count} comment${count === 1 ? "" : "s"}`, t.accent, t.accent + "18")))));
   }
@@ -1738,6 +1775,7 @@ export default class Annotator extends View {
         .when(this.view === "diff", el => el.child(this.button("toggle-files", `${this.filesOpen ? "▾" : "▸"} Files · ${data ? files.length : "—"}`, cx => { this.filesOpen = !this.filesOpen; cx.notify(); })))
         .when(this.view === "diff" && Boolean(totals?.added), el => el.child(this.badge(`+${totals.added}`, t.ansi2)))
         .when(this.view === "diff" && Boolean(totals?.removed), el => el.child(this.badge(`−${totals.removed}`, t.ansi1)))
+        .when(this.view === "diff" && files.some(f => !f.draftOnly), el => el.child(this.badge(this.viewedSummary(files), t.dim)))
         .when(this.view !== "diff", el => el.child(this.button("filter-unread", this.onlyUnread ? "● Unread only" : "All comments", cx => { this.onlyUnread = !this.onlyUnread; cx.notify(); })))
            .child(div().flex_1().min_w(0))
            .child(this.comparisonSwitch("sidebar", data?.snapshot)))

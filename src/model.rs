@@ -299,6 +299,11 @@ pub struct ChangedFile {
     pub added: Option<u32>,
     #[serde(default)]
     pub removed: Option<u32>,
+    /// Changes whenever either side of this file's comparison changes, so a
+    /// "viewed" mark can tell when the file needs another look. None when Git
+    /// could not identify the new content (submodules, unreadable paths).
+    #[serde(default)]
+    pub fingerprint: Option<String>,
     pub rows: Vec<DiffLine>,
     pub note: Option<String>,
     pub truncated: bool,

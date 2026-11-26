@@ -33,6 +33,7 @@ test("normal-mode keys parse into motions, counts and two-key sequences", () => 
   assert.equal(press(["]", "c"]).action.motion, "next-change");
   assert.deepEqual(press(["[", "q"]).action, { type: "file", delta: -1, count: 1, counted: false });
   assert.equal(press(["Z", "Z"]).action.type, "submit");
+  assert.equal(press(["x"]).action.type, "viewed");
   assert.equal(press([{ key: "d", keystroke: "ctrl-d", modifiers: { control: true } }]).action.motion, "half-down");
   assert.equal(press([{ key: "enter", keystroke: "enter" }]).action.type, "comment");
 });
@@ -40,7 +41,7 @@ test("normal-mode keys parse into motions, counts and two-key sequences", () => 
 test("command chords and unknown keys pass through to Herdr and the mod", () => {
   const copy = readKey(EMPTY_KEYS, { key: "c", keystroke: "cmd-c", key_char: "c", modifiers: { platform: true } });
   assert.equal(copy.handled, false);
-  assert.equal(readKey(EMPTY_KEYS, key("x")).handled, false);
+  assert.equal(readKey(EMPTY_KEYS, key("q")).handled, false);
   // Escape is offered to the mod's own handler unless visual mode claims it.
   const escape = readKey(EMPTY_KEYS, { key: "escape", keystroke: "escape" });
   assert.equal(escape.action.type, "escape");

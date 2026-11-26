@@ -411,3 +411,37 @@ export function savedBaseChoice(value) {
   }
   return { base: typeof value?.base === "string" ? value.base : null, explicit: value?.explicit === true };
 }
+
+// Viewed marks follow one checkout, branch and comparison across new commits;
+// a file's fingerprint (or, without one, its status and line counts) decides
+// whether it changed since it was marked.
+export function viewedKey(snapshot) {
+  return snapshot ? JSON.stringify([snapshot.scope, snapshot.branch]) : null;
+}
+
+export function fileFingerprint(file) {
+  return file.fingerprint ?? `${file.status}:${file.added ?? "?"}:${file.removed ?? "?"}`;
+}
+
+/** @returns {"viewed"|"changed"|null} */
+export function viewedState(marks, file) {
+  const mark = marks?.[file.path];
+  if (mark == null) return null;
+  return mark === fileFingerprint(file) ? "viewed" : "changed";
+}
+
+/** Marks with this file set (or cleared) at its current fingerprint. */
+export function withViewed(marks, file, viewed) {
+  const { [file.path]: _previous, ...rest } = marks ?? {};
+  return viewed ? { ...rest, [file.path]: fileFingerprint(file) } : rest;
+}
+
+/** Saved reviews keep their own marks; the newest `limit` reviews are kept. */
+export function storeViewed(entries, key, marks, limit = 30) {
+  const others = (entries ?? []).filter(entry => entry.key !== key);
+  return (Object.keys(marks).length ? [...others, { key, files: marks }] : others).slice(-limit);
+}
+
+export function viewedCount(marks, files) {
+  return files.filter(file => !file.draftOnly && viewedState(marks, file) === "viewed").length;
+}

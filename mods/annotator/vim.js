@@ -5,7 +5,7 @@ export const HALF_PAGE = 15;
 
 export const VIM_HELP = "j/k move · gg/G top/bottom · Ctrl-d/u half page · ]c/[c change · ]q/[q file · "
   + "h/l old/new side · V visual · c/i/Enter comment (nvim keys; :w saves, Esc twice back) · C file comment · K ask · "
-  + "/ find, n/N · t split/unified · ZZ review & send · jk leaves the comment box";
+  + "/ find, n/N · t split/unified · x viewed (]q marks it too) · ZZ review & send · jk leaves the comment box";
 
 /**
  * The text before a just-typed "jk", or null. Mirrors an insert-mode `jk` escape
@@ -132,6 +132,7 @@ const SINGLE = {
   n: { type: "find-step", delta: 1 },
   N: { type: "find-step", delta: -1 },
   t: { type: "toggle-split" },
+  x: { type: "viewed" },
   "?": { type: "help" },
 };
 const NAMED = {
